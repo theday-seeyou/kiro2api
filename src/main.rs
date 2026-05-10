@@ -1,6 +1,7 @@
 mod admin;
 mod admin_ui;
 mod anthropic;
+mod call_log;
 mod common;
 mod http_client;
 mod kiro;
@@ -8,6 +9,7 @@ mod model;
 pub mod token;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -111,10 +113,7 @@ async fn main() {
 
     // 校验所有凭据声明的端点都已注册
     for cred in &credentials_list {
-        let name = cred
-            .endpoint
-            .as_deref()
-            .unwrap_or(&config.default_endpoint);
+        let name = cred.endpoint.as_deref().unwrap_or(&config.default_endpoint);
         if !endpoints.contains_key(name) {
             tracing::error!(
                 "凭据 id={:?} 指定了未知端点 \"{}\"（已注册: {:?}）",
@@ -157,11 +156,95 @@ async fn main() {
         tls_backend: config.tls_backend,
     });
 
+    let true_cache = if config.true_cache_enabled {
+        let cache_dir = config
+            .true_cache_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                config
+                    .config_path()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.join("true-cache"))
+                    .unwrap_or_else(|| PathBuf::from("true-cache"))
+            });
+        tracing::info!(
+            "真缓存已启用: dir={}, response_ttl_secs={}, max_response_bytes={}",
+            cache_dir.display(),
+            config.true_cache_response_ttl_secs,
+            config.true_cache_max_response_bytes
+        );
+        Some(anthropic::TrueCache::new(
+            cache_dir,
+            std::time::Duration::from_secs(config.true_cache_response_ttl_secs),
+            config.true_cache_max_response_bytes,
+        ))
+    } else {
+        None
+    };
+
+    let call_log_store = if config.call_log_enabled {
+        let log_dir = config
+            .call_log_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                config
+                    .config_path()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.join("call-logs"))
+                    .unwrap_or_else(|| PathBuf::from("call-logs"))
+            });
+        tracing::info!(
+            "调用记录已启用: dir={}, max_records={}, max_body_bytes={}",
+            log_dir.display(),
+            config.call_log_max_records,
+            config.call_log_max_body_bytes
+        );
+        Some(call_log::CallLogStore::new(
+            log_dir,
+            config.call_log_max_records,
+            config.call_log_max_body_bytes,
+        ))
+    } else {
+        None
+    };
+
+    let input_cache = if config.input_cache_enabled {
+        let cache_dir = config
+            .input_cache_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                config
+                    .config_path()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.join("input-cache"))
+                    .unwrap_or_else(|| PathBuf::from("input-cache"))
+            });
+        tracing::info!(
+            "输入技术缓存已启用: dir={}, short_ttl_secs={}, long_ttl_secs={}",
+            cache_dir.display(),
+            config.input_cache_short_ttl_secs,
+            config.input_cache_long_ttl_secs
+        );
+        Some(anthropic::InputCache::new(
+            cache_dir,
+            config.input_cache_short_ttl_secs,
+            config.input_cache_long_ttl_secs,
+        ))
+    } else {
+        None
+    };
+
     // 构建 Anthropic API 路由（profile_arn 由 provider 层根据实际凭据动态注入）
     let anthropic_app = anthropic::create_router_with_provider(
         &api_key,
         Some(kiro_provider),
         config.extract_thinking,
+        true_cache,
+        input_cache,
+        call_log_store.clone(),
     );
 
     // 构建 Admin API 路由（如果配置了非空的 admin_api_key）
@@ -177,8 +260,11 @@ async fn main() {
             tracing::warn!("admin_api_key 配置为空，Admin API 未启用");
             anthropic_app
         } else {
-            let admin_service =
-                admin::AdminService::new(token_manager.clone(), endpoint_names.clone());
+            let admin_service = admin::AdminService::new(
+                token_manager.clone(),
+                endpoint_names.clone(),
+                call_log_store.clone(),
+            );
             let admin_state = admin::AdminState::new(admin_key, admin_service);
             let admin_app = admin::create_admin_router(admin_state);
 
@@ -210,6 +296,7 @@ async fn main() {
         tracing::info!("  POST /api/admin/credentials/:index/priority");
         tracing::info!("  POST /api/admin/credentials/:index/reset");
         tracing::info!("  GET  /api/admin/credentials/:index/balance");
+        tracing::info!("  GET  /api/admin/call-logs");
         tracing::info!("Admin UI:");
         tracing::info!("  GET  /admin");
     }

@@ -11,3 +11,7 @@ services:
     volumes:
       - ./config/:/app/config/
     restart: unless-stopped
+
+networks:
+  default:
+    name: kiro-rs_default

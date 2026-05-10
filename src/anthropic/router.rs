@@ -7,9 +7,11 @@ use axum::{
     routing::{get, post},
 };
 
+use crate::call_log::CallLogStore;
 use crate::kiro::provider::KiroProvider;
 
 use super::{
+    InputCache, TrueCache,
     handlers::{count_tokens, get_models, post_messages, post_messages_cc},
     middleware::{AppState, auth_middleware, cors_layer},
 };
@@ -38,10 +40,22 @@ pub fn create_router_with_provider(
     api_key: impl Into<String>,
     kiro_provider: Option<KiroProvider>,
     extract_thinking: bool,
+    true_cache: Option<TrueCache>,
+    input_cache: Option<InputCache>,
+    call_log_store: Option<CallLogStore>,
 ) -> Router {
     let mut state = AppState::new(api_key, extract_thinking);
     if let Some(provider) = kiro_provider {
         state = state.with_kiro_provider(provider);
+    }
+    if let Some(cache) = true_cache {
+        state = state.with_true_cache(cache);
+    }
+    if let Some(cache) = input_cache {
+        state = state.with_input_cache(cache);
+    }
+    if let Some(store) = call_log_store {
+        state = state.with_call_log_store(store);
     }
 
     // 需要认证的 /v1 路由

@@ -10,10 +10,12 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 
+use crate::call_log::CallLogStore;
 use crate::common::auth;
 use crate::kiro::provider::KiroProvider;
 
 use super::types::ErrorResponse;
+use super::{InputCache, TrueCache};
 
 /// 应用共享状态
 #[derive(Clone)]
@@ -25,6 +27,12 @@ pub struct AppState {
     pub kiro_provider: Option<Arc<KiroProvider>>,
     /// 是否开启非流式响应的 thinking 块提取
     pub extract_thinking: bool,
+    /// 真缓存：成功响应精确缓存，避免重复请求再次打到上游
+    pub true_cache: Option<Arc<TrueCache>>,
+    /// 输入技术缓存：记录 system/tools/history/tool_result 的可复用 token
+    pub input_cache: Option<Arc<InputCache>>,
+    /// 调用记录：用于 Admin API/UI 查看请求、响应、用量和缓存状态
+    pub call_log_store: Option<Arc<CallLogStore>>,
 }
 
 impl AppState {
@@ -34,12 +42,33 @@ impl AppState {
             api_key: api_key.into(),
             kiro_provider: None,
             extract_thinking,
+            true_cache: None,
+            input_cache: None,
+            call_log_store: None,
         }
     }
 
     /// 设置 KiroProvider
     pub fn with_kiro_provider(mut self, provider: KiroProvider) -> Self {
         self.kiro_provider = Some(Arc::new(provider));
+        self
+    }
+
+    /// 设置真缓存
+    pub fn with_true_cache(mut self, cache: TrueCache) -> Self {
+        self.true_cache = Some(Arc::new(cache));
+        self
+    }
+
+    /// 设置输入技术缓存
+    pub fn with_input_cache(mut self, cache: InputCache) -> Self {
+        self.input_cache = Some(Arc::new(cache));
+        self
+    }
+
+    /// 设置调用记录存储
+    pub fn with_call_log_store(mut self, store: CallLogStore) -> Self {
+        self.call_log_store = Some(Arc::new(store));
         self
     }
 }

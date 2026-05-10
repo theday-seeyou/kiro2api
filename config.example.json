@@ -5,5 +5,18 @@
   "tlsBackend": "rustls",
   "region": "us-east-1",
   "adminApiKey": "sk-admin-your-secret-key",
-  "defaultEndpoint": "ide"
+  "proxyPool": [],
+  "defaultEndpoint": "ide",
+  "trueCacheEnabled": false,
+  "trueCacheDir": "true-cache",
+  "trueCacheResponseTtlSecs": 21600,
+  "trueCacheMaxResponseBytes": 4194304,
+  "inputCacheEnabled": true,
+  "inputCacheDir": "input-cache",
+  "inputCacheShortTtlSecs": 300,
+  "inputCacheLongTtlSecs": 3600,
+  "callLogEnabled": false,
+  "callLogDir": "call-logs",
+  "callLogMaxRecords": 10000,
+  "callLogMaxBodyBytes": 262144
 }

@@ -3,6 +3,7 @@ import {
   getCredentials,
   setCredentialDisabled,
   setCredentialPriority,
+  setCredentialProxy,
   resetCredentialFailure,
   forceRefreshToken,
   getCredentialBalance,
@@ -10,8 +11,13 @@ import {
   deleteCredential,
   getLoadBalancingMode,
   setLoadBalancingMode,
+  getCallLogs,
+  getProxyPool,
+  addProxyPoolItem,
+  deleteProxyPoolItem,
+  assignProxyPool,
 } from '@/api/credentials'
-import type { AddCredentialRequest } from '@/types/api'
+import type { AddCredentialRequest, AddProxyPoolItemRequest, AssignProxyPoolRequest, SetProxyRequest } from '@/types/api'
 
 // 查询凭据列表
 export function useCredentials() {
@@ -52,6 +58,58 @@ export function useSetPriority() {
       setCredentialPriority(id, priority),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
+    },
+  })
+}
+
+// 设置凭据级代理
+export function useSetProxy() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, proxy }: { id: number; proxy: SetProxyRequest }) =>
+      setCredentialProxy(id, proxy),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+      queryClient.invalidateQueries({ queryKey: ['proxyPool'] })
+    },
+  })
+}
+
+export function useProxyPool() {
+  return useQuery({
+    queryKey: ['proxyPool'],
+    queryFn: getProxyPool,
+    refetchInterval: 30000,
+  })
+}
+
+export function useAddProxyPoolItem() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (req: AddProxyPoolItemRequest) => addProxyPoolItem(req),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['proxyPool'] })
+    },
+  })
+}
+
+export function useDeleteProxyPoolItem() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => deleteProxyPoolItem(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['proxyPool'] })
+    },
+  })
+}
+
+export function useAssignProxyPool() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (req: AssignProxyPoolRequest) => assignProxyPool(req),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials'] })
+      queryClient.invalidateQueries({ queryKey: ['proxyPool'] })
     },
   })
 }
@@ -116,5 +174,13 @@ export function useSetLoadBalancingMode() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['loadBalancingMode'] })
     },
+  })
+}
+
+export function useCallLogs(limit = 20) {
+  return useQuery({
+    queryKey: ['callLogs', limit],
+    queryFn: () => getCallLogs(limit),
+    refetchInterval: 15000,
   })
 }

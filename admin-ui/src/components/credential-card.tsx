@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { toast } from 'sonner'
-import { RefreshCw, ChevronUp, ChevronDown, Wallet, Trash2, Loader2 } from 'lucide-react'
+import { RefreshCw, ChevronUp, ChevronDown, Wallet, Trash2, Loader2, Network } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -19,6 +19,7 @@ import type { CredentialStatusItem, BalanceResponse } from '@/types/api'
 import {
   useSetDisabled,
   useSetPriority,
+  useSetProxy,
   useResetFailure,
   useDeleteCredential,
   useForceRefreshToken,
@@ -49,6 +50,16 @@ function formatLastUsed(lastUsedAt: string | null): string {
   return `${days} 天前`
 }
 
+function formatCooldown(seconds?: number): string {
+  if (seconds === undefined || seconds <= 0) return '即将恢复'
+  if (seconds < 60) return `${seconds} 秒`
+  const minutes = Math.ceil(seconds / 60)
+  if (minutes < 60) return `${minutes} 分钟`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return rest > 0 ? `${hours} 小时 ${rest} 分钟` : `${hours} 小时`
+}
+
 export function CredentialCard({
   credential,
   onViewBalance,
@@ -60,9 +71,14 @@ export function CredentialCard({
   const [editingPriority, setEditingPriority] = useState(false)
   const [priorityValue, setPriorityValue] = useState(String(credential.priority))
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [showProxyDialog, setShowProxyDialog] = useState(false)
+  const [proxyUrl, setProxyUrl] = useState(credential.proxyUrl || '')
+  const [proxyUsername, setProxyUsername] = useState('')
+  const [proxyPassword, setProxyPassword] = useState('')
 
   const setDisabled = useSetDisabled()
   const setPriority = useSetPriority()
+  const setProxy = useSetProxy()
   const resetFailure = useResetFailure()
   const deleteCredential = useDeleteCredential()
   const forceRefresh = useForceRefreshToken()
@@ -96,6 +112,44 @@ export function CredentialCard({
         },
         onError: (err) => {
           toast.error('操作失败: ' + (err as Error).message)
+        },
+      }
+    )
+  }
+
+  const openProxyDialog = () => {
+    setProxyUrl(credential.proxyUrl || '')
+    setProxyUsername('')
+    setProxyPassword('')
+    setShowProxyDialog(true)
+  }
+
+  const handleProxyChange = () => {
+    const normalizedUrl = proxyUrl.trim()
+    const normalizedUsername = proxyUsername.trim()
+    const normalizedPassword = proxyPassword.trim()
+
+    if ((normalizedUsername && !normalizedPassword) || (!normalizedUsername && normalizedPassword)) {
+      toast.error('代理用户名和密码需要同时填写')
+      return
+    }
+
+    setProxy.mutate(
+      {
+        id: credential.id,
+        proxy: {
+          proxyUrl: normalizedUrl || undefined,
+          proxyUsername: normalizedUsername || undefined,
+          proxyPassword: normalizedPassword || undefined,
+        },
+      },
+      {
+        onSuccess: (res) => {
+          toast.success(res.message)
+          setShowProxyDialog(false)
+        },
+        onError: (err) => {
+          toast.error('代理配置失败: ' + (err as Error).message)
         },
       }
     )
@@ -161,6 +215,11 @@ export function CredentialCard({
                 )}
                 {credential.disabled && credential.disabledReason && (
                   <Badge variant="outline">{credential.disabledReason}</Badge>
+                )}
+                {credential.disabledReason === 'RateLimited' && (
+                  <Badge variant="secondary">
+                    冷却 {formatCooldown(credential.rateLimitCooldownSecs)}
+                  </Badge>
                 )}
                 {credential.authMethod && (
                   <Badge variant="secondary">
@@ -242,6 +301,14 @@ export function CredentialCard({
                 {credential.refreshFailureCount}
               </span>
             </div>
+            {credential.disabledReason === 'RateLimited' && (
+              <div>
+                <span className="text-muted-foreground">限流冷却：</span>
+                <span className="font-medium">
+                  {formatCooldown(credential.rateLimitCooldownSecs)}
+                </span>
+              </div>
+            )}
             <div>
               <span className="text-muted-foreground">订阅等级：</span>
               <span className="font-medium">
@@ -281,12 +348,12 @@ export function CredentialCard({
                 <span className="text-sm text-muted-foreground ml-1">未知</span>
               )}
             </div>
-            {credential.hasProxy && (
-              <div className="col-span-2">
-                <span className="text-muted-foreground">代理：</span>
-                <span className="font-medium">{credential.proxyUrl}</span>
-              </div>
-            )}
+            <div className="col-span-2">
+              <span className="text-muted-foreground">代理：</span>
+              <span className="font-medium">
+                {credential.hasProxy ? credential.proxyUrl : '未配置'}
+              </span>
+            </div>
             {credential.hasProfileArn && (
               <div className="col-span-2">
                 <Badge variant="secondary">有 Profile ARN</Badge>
@@ -361,6 +428,14 @@ export function CredentialCard({
             </Button>
             <Button
               size="sm"
+              variant="outline"
+              onClick={openProxyDialog}
+            >
+              <Network className="h-4 w-4 mr-1" />
+              设置代理
+            </Button>
+            <Button
+              size="sm"
               variant="destructive"
               onClick={() => setShowDeleteDialog(true)}
               disabled={!credential.disabled}
@@ -396,6 +471,73 @@ export function CredentialCard({
               disabled={deleteCredential.isPending || !credential.disabled}
             >
               确认删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 代理配置对话框 */}
+      <Dialog open={showProxyDialog} onOpenChange={setShowProxyDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>设置凭据 #{credential.id} 代理</DialogTitle>
+            <DialogDescription>
+              留空保存会清除账号级代理；填写 direct 表示显式直连。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <label htmlFor={`proxy-url-${credential.id}`} className="text-sm font-medium">
+                代理地址
+              </label>
+              <Input
+                id={`proxy-url-${credential.id}`}
+                value={proxyUrl}
+                onChange={(event) => setProxyUrl(event.target.value)}
+                placeholder="socks5://host:port 或 http://host:port"
+                disabled={setProxy.isPending}
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label htmlFor={`proxy-user-${credential.id}`} className="text-sm font-medium">
+                  用户名
+                </label>
+                <Input
+                  id={`proxy-user-${credential.id}`}
+                  value={proxyUsername}
+                  onChange={(event) => setProxyUsername(event.target.value)}
+                  disabled={setProxy.isPending}
+                />
+              </div>
+              <div className="space-y-1">
+                <label htmlFor={`proxy-pass-${credential.id}`} className="text-sm font-medium">
+                  密码
+                </label>
+                <Input
+                  id={`proxy-pass-${credential.id}`}
+                  type="password"
+                  value={proxyPassword}
+                  onChange={(event) => setProxyPassword(event.target.value)}
+                  disabled={setProxy.isPending}
+                />
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowProxyDialog(false)}
+              disabled={setProxy.isPending}
+            >
+              取消
+            </Button>
+            <Button
+              onClick={handleProxyChange}
+              disabled={setProxy.isPending}
+            >
+              {setProxy.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+              保存
             </Button>
           </DialogFooter>
         </DialogContent>

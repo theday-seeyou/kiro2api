@@ -7,14 +7,19 @@ use std::sync::Arc;
 use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
+use crate::call_log::{CallLogListResponse, CallLogQuery, CallLogStore, disabled_call_logs};
 use crate::kiro::model::credentials::KiroCredentials;
-use crate::kiro::token_manager::MultiTokenManager;
+use crate::kiro::token_manager::{MultiTokenManager, ProxyPoolAssignResult};
+use crate::model::config::ProxyPoolItem;
 
 use super::error::AdminServiceError;
 use super::types::{
-    AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
-    CredentialsStatusResponse, LoadBalancingModeResponse, SetLoadBalancingModeRequest,
+    AddCredentialRequest, AddCredentialResponse, AddProxyPoolItemRequest, AssignProxyPoolRequest,
+    BalanceResponse, CredentialStatusItem, CredentialsStatusResponse, LoadBalancingModeResponse,
+    ProxyPoolItemResponse, ProxyPoolResponse, SetLoadBalancingModeRequest,
+    SetProxyPoolDisabledRequest, SetProxyRequest,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -38,12 +43,15 @@ pub struct AdminService {
     cache_path: Option<PathBuf>,
     /// 已注册的端点名称集合（用于 add_credential 校验）
     known_endpoints: HashSet<String>,
+    /// 调用记录存储（可选）
+    call_log_store: Option<CallLogStore>,
 }
 
 impl AdminService {
     pub fn new(
         token_manager: Arc<MultiTokenManager>,
         known_endpoints: impl IntoIterator<Item = String>,
+        call_log_store: Option<CallLogStore>,
     ) -> Self {
         let cache_path = token_manager
             .cache_dir()
@@ -56,6 +64,15 @@ impl AdminService {
             balance_cache: Mutex::new(balance_cache),
             cache_path,
             known_endpoints: known_endpoints.into_iter().collect(),
+            call_log_store,
+        }
+    }
+
+    /// 获取调用记录
+    pub fn get_call_logs(&self, query: CallLogQuery) -> CallLogListResponse {
+        match &self.call_log_store {
+            Some(store) => store.list(query),
+            None => disabled_call_logs(query),
         }
     }
 
@@ -86,6 +103,8 @@ impl AdminService {
                 proxy_url: entry.proxy_url,
                 refresh_failure_count: entry.refresh_failure_count,
                 disabled_reason: entry.disabled_reason,
+                rate_limited_until: entry.rate_limited_until,
+                rate_limit_cooldown_secs: entry.rate_limit_cooldown_secs,
                 endpoint: entry.endpoint.unwrap_or_else(|| default_endpoint.clone()),
             })
             .collect();
@@ -123,6 +142,134 @@ impl AdminService {
         self.token_manager
             .set_priority(id, priority)
             .map_err(|e| self.classify_error(e, id))
+    }
+
+    /// 设置凭据级代理
+    pub fn set_proxy(&self, id: u64, req: SetProxyRequest) -> Result<(), AdminServiceError> {
+        let proxy_url = normalize_optional_string(req.proxy_url);
+        let proxy_username = normalize_optional_string(req.proxy_username);
+        let proxy_password = normalize_optional_string(req.proxy_password);
+
+        if proxy_username.is_some() ^ proxy_password.is_some() {
+            return Err(AdminServiceError::InvalidCredential(
+                "proxyUsername 和 proxyPassword 必须同时填写或同时留空".to_string(),
+            ));
+        }
+
+        if let Some(url) = proxy_url.as_deref() {
+            validate_proxy_url(url)?;
+        }
+
+        self.token_manager
+            .set_proxy(id, proxy_url, proxy_username, proxy_password)
+            .map_err(|e| self.classify_error(e, id))
+    }
+
+    /// 获取代理池（脱敏）
+    pub fn get_proxy_pool(&self) -> ProxyPoolResponse {
+        let snapshot = self.token_manager.snapshot();
+        let proxies = self
+            .token_manager
+            .get_proxy_pool()
+            .into_iter()
+            .map(|proxy| {
+                let mut assigned_credential_ids: Vec<u64> = snapshot
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.proxy_url.as_deref() == Some(proxy.url.as_str()))
+                    .map(|entry| entry.id)
+                    .collect();
+                assigned_credential_ids.sort_unstable();
+
+                ProxyPoolItemResponse {
+                    id: proxy.id,
+                    url: proxy.url,
+                    has_auth: proxy.username.is_some() || proxy.password.is_some(),
+                    disabled: proxy.disabled,
+                    assigned_count: assigned_credential_ids.len(),
+                    assigned_credential_ids,
+                }
+            })
+            .collect();
+
+        ProxyPoolResponse { proxies }
+    }
+
+    /// 添加代理池条目
+    pub fn add_proxy_pool_item(
+        &self,
+        req: AddProxyPoolItemRequest,
+    ) -> Result<(), AdminServiceError> {
+        let id = normalize_optional_string(req.id)
+            .unwrap_or_else(|| format!("proxy-{}", &Uuid::new_v4().simple().to_string()[..8]));
+        let url = req.url.trim().to_string();
+        let username = normalize_optional_string(req.username);
+        let password = normalize_optional_string(req.password);
+
+        if id.is_empty() {
+            return Err(AdminServiceError::InvalidCredential(
+                "代理池 ID 不能为空".to_string(),
+            ));
+        }
+        if username.is_some() ^ password.is_some() {
+            return Err(AdminServiceError::InvalidCredential(
+                "username 和 password 必须同时填写或同时留空".to_string(),
+            ));
+        }
+        validate_proxy_url(&url)?;
+        if url.eq_ignore_ascii_case(KiroCredentials::PROXY_DIRECT) {
+            return Err(AdminServiceError::InvalidCredential(
+                "代理池不能添加 direct；需要直连时请在单个账号代理中设置 direct".to_string(),
+            ));
+        }
+
+        self.token_manager
+            .add_proxy_pool_item(ProxyPoolItem {
+                id,
+                url,
+                username,
+                password,
+                disabled: req.disabled,
+            })
+            .map_err(|e| self.classify_proxy_pool_error(e))
+    }
+
+    /// 删除代理池条目
+    pub fn delete_proxy_pool_item(&self, id: String) -> Result<(), AdminServiceError> {
+        self.token_manager
+            .delete_proxy_pool_item(id.as_str())
+            .map_err(|e| self.classify_proxy_pool_error(e))
+    }
+
+    /// 设置代理池条目禁用状态
+    pub fn set_proxy_pool_disabled(
+        &self,
+        id: String,
+        req: SetProxyPoolDisabledRequest,
+    ) -> Result<(), AdminServiceError> {
+        self.token_manager
+            .set_proxy_pool_disabled(id.as_str(), req.disabled)
+            .map_err(|e| self.classify_proxy_pool_error(e))
+    }
+
+    /// 将代理池分配到账号级代理
+    pub fn assign_proxy_pool(
+        &self,
+        req: AssignProxyPoolRequest,
+    ) -> Result<ProxyPoolAssignResult, AdminServiceError> {
+        if req
+            .credential_ids
+            .as_ref()
+            .is_some_and(|ids| ids.is_empty())
+        {
+            return Err(AdminServiceError::InvalidCredential(
+                "credentialIds 不能为空；如需分配全部账号请省略该字段".to_string(),
+            ));
+        }
+
+        self.token_manager
+            .assign_proxy_pool(req.credential_ids, req.overwrite)
+            .map_err(|e| self.classify_proxy_pool_error(e))
     }
 
     /// 重置失败计数并重新启用
@@ -448,10 +595,50 @@ impl AdminService {
         let msg = e.to_string();
         if msg.contains("不存在") {
             AdminServiceError::NotFound { id }
-        } else if msg.contains("只能删除已禁用的凭据") || msg.contains("请先禁用凭据") {
+        } else if msg.contains("只能删除已禁用的凭据") || msg.contains("请先禁用凭据")
+        {
             AdminServiceError::InvalidCredential(msg)
         } else {
             AdminServiceError::InternalError(msg)
         }
     }
+
+    fn classify_proxy_pool_error(&self, e: anyhow::Error) -> AdminServiceError {
+        let msg = e.to_string();
+        if msg.contains("不存在") || msg.contains("已存在") || msg.contains("没有可用代理")
+        {
+            AdminServiceError::InvalidCredential(msg)
+        } else {
+            AdminServiceError::InternalError(msg)
+        }
+    }
+}
+
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn validate_proxy_url(url: &str) -> Result<(), AdminServiceError> {
+    if url.eq_ignore_ascii_case(KiroCredentials::PROXY_DIRECT) {
+        return Ok(());
+    }
+
+    let valid_scheme =
+        url.starts_with("http://") || url.starts_with("https://") || url.starts_with("socks5://");
+    if !valid_scheme {
+        return Err(AdminServiceError::InvalidCredential(
+            "proxyUrl 必须以 http://、https://、socks5:// 开头，或填写 direct".to_string(),
+        ));
+    }
+
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or("");
+    if after_scheme.trim().is_empty() {
+        return Err(AdminServiceError::InvalidCredential(
+            "proxyUrl 缺少代理主机和端口".to_string(),
+        ));
+    }
+
+    Ok(())
 }

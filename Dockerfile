@@ -2,9 +2,9 @@ FROM node:22-alpine AS frontend-builder
 
 WORKDIR /app/admin-ui
 COPY admin-ui/package.json ./
-RUN npm install -g pnpm && pnpm install
+RUN npm install
 COPY admin-ui ./
-RUN pnpm build
+RUN npm run build
 
 FROM rust:1.92-alpine AS builder
 

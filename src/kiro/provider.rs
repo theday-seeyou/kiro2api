@@ -5,7 +5,7 @@
 //! 支持多凭据故障转移和重试
 //! 支持按凭据级 endpoint 切换不同 Kiro API 端点
 
-use reqwest::Client;
+use reqwest::{Client, header::HeaderValue};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,8 +66,8 @@ impl KiroProvider {
         );
         let tls_backend = token_manager.config().tls_backend;
         // 预热：构建全局代理对应的 Client
-        let initial_client = build_client(proxy.as_ref(), 720, tls_backend)
-            .expect("创建 HTTP 客户端失败");
+        let initial_client =
+            build_client(proxy.as_ref(), 720, tls_backend).expect("创建 HTTP 客户端失败");
         let mut cache = HashMap::new();
         cache.insert(proxy.clone(), initial_client);
 
@@ -94,10 +94,7 @@ impl KiroProvider {
     }
 
     /// 根据凭据选择 endpoint 实现
-    fn endpoint_for(
-        &self,
-        credentials: &KiroCredentials,
-    ) -> anyhow::Result<Arc<dyn KiroEndpoint>> {
+    fn endpoint_for(&self, credentials: &KiroCredentials) -> anyhow::Result<Arc<dyn KiroEndpoint>> {
         let name = credentials
             .endpoint
             .as_deref()
@@ -195,6 +192,10 @@ impl KiroProvider {
             // 成功响应
             if status.is_success() {
                 self.token_manager.report_success(ctx.id);
+                let mut response = response;
+                if let Ok(value) = HeaderValue::from_str(&ctx.id.to_string()) {
+                    response.headers_mut().insert("x-kiro-credential-id", value);
+                }
                 return Ok(response);
             }
 
@@ -211,6 +212,27 @@ impl KiroProvider {
                 continue;
             }
 
+            // 明确的账号限流/节流：切换凭据重试；不把普通空 429 当成账号限流
+            if endpoint.is_rate_limited(status.as_u16(), &body) {
+                tracing::warn!(
+                    "MCP 请求失败（账号疑似被限流，切换凭据，尝试 {}/{}）: {} {}",
+                    attempt + 1,
+                    max_retries,
+                    status,
+                    body
+                );
+                let has_available = self.token_manager.report_rate_limited(ctx.id);
+                if !has_available {
+                    anyhow::bail!(
+                        "MCP 请求失败（所有凭据已限流或不可用）: {} {}",
+                        status,
+                        body
+                    );
+                }
+                last_error = Some(anyhow::anyhow!("MCP 请求失败: {} {}", status, body));
+                continue;
+            }
+
             // 400 Bad Request
             if status.as_u16() == 400 {
                 anyhow::bail!("MCP 请求失败: {} {}", status, body);
@@ -222,7 +244,12 @@ impl KiroProvider {
                 if endpoint.is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
                     force_refreshed.insert(ctx.id);
                     tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
-                    if self.token_manager.force_refresh_token_for(ctx.id).await.is_ok() {
+                    if self
+                        .token_manager
+                        .force_refresh_token_for(ctx.id)
+                        .await
+                        .is_ok()
+                    {
                         tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
                         continue;
                     }
@@ -389,6 +416,35 @@ impl KiroProvider {
                 continue;
             }
 
+            // 明确的账号限流/节流：切换凭据重试；不把普通空 429 当成账号限流
+            if endpoint.is_rate_limited(status.as_u16(), &body) {
+                tracing::warn!(
+                    "API 请求失败（账号疑似被限流，切换凭据，尝试 {}/{}）: {} {}",
+                    attempt + 1,
+                    max_retries,
+                    status,
+                    body
+                );
+
+                let has_available = self.token_manager.report_rate_limited(ctx.id);
+                if !has_available {
+                    anyhow::bail!(
+                        "{} API 请求失败（所有凭据已限流或不可用）: {} {}",
+                        api_type,
+                        status,
+                        body
+                    );
+                }
+
+                last_error = Some(anyhow::anyhow!(
+                    "{} API 请求失败: {} {}",
+                    api_type,
+                    status,
+                    body
+                ));
+                continue;
+            }
+
             // 400 Bad Request - 请求问题，重试/切换凭据无意义
             if status.as_u16() == 400 {
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
@@ -408,7 +464,12 @@ impl KiroProvider {
                 if endpoint.is_bearer_token_invalid(&body) && !force_refreshed.contains(&ctx.id) {
                     force_refreshed.insert(ctx.id);
                     tracing::info!("凭据 #{} token 疑似被上游失效，尝试强制刷新", ctx.id);
-                    if self.token_manager.force_refresh_token_for(ctx.id).await.is_ok() {
+                    if self
+                        .token_manager
+                        .force_refresh_token_for(ctx.id)
+                        .await
+                        .is_ok()
+                    {
                         tracing::info!("凭据 #{} token 强制刷新成功，重试请求", ctx.id);
                         continue;
                     }

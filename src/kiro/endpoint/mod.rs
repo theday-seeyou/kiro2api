@@ -54,6 +54,11 @@ pub trait KiroEndpoint: Send + Sync {
     fn is_bearer_token_invalid(&self, body: &str) -> bool {
         default_is_bearer_token_invalid(body)
     }
+
+    /// 判断响应是否表示"当前账号被限流"（切换凭据但不按月额度永久禁用）
+    fn is_rate_limited(&self, status: u16, body: &str) -> bool {
+        default_is_rate_limited(status, body)
+    }
 }
 
 /// 装饰请求时可用的上下文
@@ -101,6 +106,39 @@ pub fn default_is_bearer_token_invalid(body: &str) -> bool {
     body.contains("The bearer token included in the request is invalid")
 }
 
+/// 默认的账号限流判断逻辑。
+///
+/// 429 本身可能只是上游整体高负载，因此这里要求正文同时出现明确的限流/节流信号。
+pub fn default_is_rate_limited(status: u16, body: &str) -> bool {
+    if body.trim().is_empty() {
+        return false;
+    }
+
+    let body_lower = body.to_lowercase();
+    let has_explicit_signal = [
+        "throttlingexception",
+        "toomanyrequestsexception",
+        "requestlimitexceeded",
+        "limitexceededexception",
+        "rate exceeded",
+        "rate limit",
+        "rate_limit",
+        "ratelimit",
+        "too many requests",
+        "too_many_requests",
+        "请求过于频繁",
+        "已被限流",
+    ]
+    .iter()
+    .any(|needle| body_lower.contains(needle));
+
+    if !has_explicit_signal {
+        return false;
+    }
+
+    matches!(status, 400 | 403 | 408 | 409 | 429 | 500..=599)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +167,31 @@ mod tests {
             "The bearer token included in the request is invalid"
         ));
         assert!(!default_is_bearer_token_invalid("unrelated error"));
+    }
+
+    #[test]
+    fn test_default_is_rate_limited_detects_explicit_signals() {
+        assert!(default_is_rate_limited(
+            429,
+            r#"{"__type":"ThrottlingException","message":"Rate exceeded"}"#
+        ));
+        assert!(default_is_rate_limited(
+            429,
+            r#"{"error":{"code":"TooManyRequestsException","message":"too many requests"}}"#
+        ));
+        assert!(default_is_rate_limited(429, "请求过于频繁，已被限流"));
+    }
+
+    #[test]
+    fn test_default_is_rate_limited_does_not_treat_plain_429_as_account_limit() {
+        assert!(!default_is_rate_limited(429, ""));
+        assert!(!default_is_rate_limited(
+            429,
+            r#"{"message":"upstream high traffic, try later"}"#
+        ));
+        assert!(!default_is_rate_limited(
+            400,
+            r#"{"message":"maximum context length exceeded"}"#
+        ));
     }
 }

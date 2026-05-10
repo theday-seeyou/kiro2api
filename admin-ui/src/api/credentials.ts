@@ -6,8 +6,14 @@ import type {
   SuccessResponse,
   SetDisabledRequest,
   SetPriorityRequest,
+  SetProxyRequest,
+  ProxyPoolResponse,
+  AddProxyPoolItemRequest,
+  AssignProxyPoolRequest,
+  ProxyPoolAssignResponse,
   AddCredentialRequest,
   AddCredentialResponse,
+  CallLogListResponse,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -57,6 +63,43 @@ export async function setCredentialPriority(
   return data
 }
 
+// 设置凭据级代理
+export async function setCredentialProxy(
+  id: number,
+  req: SetProxyRequest
+): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/credentials/${id}/proxy`, req)
+  return data
+}
+
+// 获取代理池
+export async function getProxyPool(): Promise<ProxyPoolResponse> {
+  const { data } = await api.get<ProxyPoolResponse>('/proxy-pool')
+  return data
+}
+
+// 添加代理到代理池
+export async function addProxyPoolItem(
+  req: AddProxyPoolItemRequest
+): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>('/proxy-pool', req)
+  return data
+}
+
+// 删除代理池条目
+export async function deleteProxyPoolItem(id: string): Promise<SuccessResponse> {
+  const { data } = await api.delete<SuccessResponse>(`/proxy-pool/${encodeURIComponent(id)}`)
+  return data
+}
+
+// 分配代理池到账号级代理
+export async function assignProxyPool(
+  req: AssignProxyPoolRequest
+): Promise<ProxyPoolAssignResponse> {
+  const { data } = await api.post<ProxyPoolAssignResponse>('/proxy-pool/assign', req)
+  return data
+}
+
 // 重置失败计数
 export async function resetCredentialFailure(
   id: number
@@ -102,5 +145,12 @@ export async function getLoadBalancingMode(): Promise<{ mode: 'priority' | 'bala
 // 设置负载均衡模式
 export async function setLoadBalancingMode(mode: 'priority' | 'balanced'): Promise<{ mode: 'priority' | 'balanced' }> {
   const { data } = await api.put<{ mode: 'priority' | 'balanced' }>('/config/load-balancing', { mode })
+  return data
+}
+
+export async function getCallLogs(limit = 20): Promise<CallLogListResponse> {
+  const { data } = await api.get<CallLogListResponse>('/call-logs', {
+    params: { limit },
+  })
   return data
 }

@@ -60,6 +60,12 @@ pub struct CredentialStatusItem {
     /// 禁用原因
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
+    /// 限流冷却预计结束时间（RFC3339）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limited_until: Option<String>,
+    /// 限流冷却剩余秒数
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_cooldown_secs: Option<u64>,
     /// 端点名称（决定该凭据走哪套 Kiro API，已回退到默认端点）
     pub endpoint: String,
 }
@@ -80,6 +86,67 @@ pub struct SetDisabledRequest {
 pub struct SetPriorityRequest {
     /// 新优先级值
     pub priority: u32,
+}
+
+/// 修改凭据级代理请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetProxyRequest {
+    /// 凭据级代理 URL；空值表示清除代理，"direct" 表示显式直连
+    pub proxy_url: Option<String>,
+    /// 凭据级代理认证用户名（可选）
+    pub proxy_username: Option<String>,
+    /// 凭据级代理认证密码（可选）
+    pub proxy_password: Option<String>,
+}
+
+// ============ 代理池 ============
+
+/// 代理池响应
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyPoolResponse {
+    pub proxies: Vec<ProxyPoolItemResponse>,
+}
+
+/// 单个代理池条目的脱敏展示
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyPoolItemResponse {
+    pub id: String,
+    pub url: String,
+    pub has_auth: bool,
+    pub disabled: bool,
+    pub assigned_count: usize,
+    pub assigned_credential_ids: Vec<u64>,
+}
+
+/// 添加代理池条目请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddProxyPoolItemRequest {
+    pub id: Option<String>,
+    pub url: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+/// 代理池分配请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignProxyPoolRequest {
+    pub credential_ids: Option<Vec<u64>>,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+/// 设置代理池条目禁用状态请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetProxyPoolDisabledRequest {
+    pub disabled: bool,
 }
 
 /// 添加凭据请求

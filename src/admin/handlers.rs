@@ -2,15 +2,18 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::IntoResponse,
 };
+
+use crate::call_log::CallLogQuery;
 
 use super::{
     middleware::AdminState,
     types::{
-        AddCredentialRequest, SetDisabledRequest, SetLoadBalancingModeRequest, SetPriorityRequest,
-        SuccessResponse,
+        AddCredentialRequest, AddProxyPoolItemRequest, AssignProxyPoolRequest, SetDisabledRequest,
+        SetLoadBalancingModeRequest, SetPriorityRequest, SetProxyPoolDisabledRequest,
+        SetProxyRequest, SuccessResponse,
     },
 };
 
@@ -19,6 +22,15 @@ use super::{
 pub async fn get_all_credentials(State(state): State<AdminState>) -> impl IntoResponse {
     let response = state.service.get_all_credentials();
     Json(response)
+}
+
+/// GET /api/admin/call-logs
+/// 获取调用记录
+pub async fn get_call_logs(
+    State(state): State<AdminState>,
+    Query(query): Query<CallLogQuery>,
+) -> impl IntoResponse {
+    Json(state.service.get_call_logs(query))
 }
 
 /// POST /api/admin/credentials/:id/disabled
@@ -50,6 +62,82 @@ pub async fn set_credential_priority(
             id, payload.priority
         )))
         .into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/credentials/:id/proxy
+/// 设置凭据级代理
+pub async fn set_credential_proxy(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(payload): Json<SetProxyRequest>,
+) -> impl IntoResponse {
+    match state.service.set_proxy(id, payload) {
+        Ok(_) => Json(SuccessResponse::new(format!("凭据 #{} 代理配置已更新", id))).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// GET /api/admin/proxy-pool
+/// 获取代理池
+pub async fn get_proxy_pool(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_proxy_pool())
+}
+
+/// POST /api/admin/proxy-pool
+/// 添加代理池条目
+pub async fn add_proxy_pool_item(
+    State(state): State<AdminState>,
+    Json(payload): Json<AddProxyPoolItemRequest>,
+) -> impl IntoResponse {
+    match state.service.add_proxy_pool_item(payload) {
+        Ok(_) => Json(SuccessResponse::new("代理已加入代理池")).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// DELETE /api/admin/proxy-pool/:id
+/// 删除代理池条目
+pub async fn delete_proxy_pool_item(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.service.delete_proxy_pool_item(id.clone()) {
+        Ok(_) => Json(SuccessResponse::new(format!("代理池条目 {} 已删除", id))).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/proxy-pool/:id/disabled
+/// 设置代理池条目禁用状态
+pub async fn set_proxy_pool_disabled(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+    Json(payload): Json<SetProxyPoolDisabledRequest>,
+) -> impl IntoResponse {
+    let disabled = payload.disabled;
+    match state.service.set_proxy_pool_disabled(id.clone(), payload) {
+        Ok(_) => {
+            let action = if disabled { "禁用" } else { "启用" };
+            Json(SuccessResponse::new(format!(
+                "代理池条目 {} 已{}",
+                id, action
+            )))
+            .into_response()
+        }
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// POST /api/admin/proxy-pool/assign
+/// 将代理池分配到账号级代理
+pub async fn assign_proxy_pool(
+    State(state): State<AdminState>,
+    Json(payload): Json<AssignProxyPoolRequest>,
+) -> impl IntoResponse {
+    match state.service.assign_proxy_pool(payload) {
+        Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
 }

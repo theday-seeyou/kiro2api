@@ -24,10 +24,14 @@
 
 mod converter;
 mod handlers;
+mod input_cache;
 mod middleware;
 mod router;
 mod stream;
+mod true_cache;
 pub mod types;
 mod websearch;
 
+pub(crate) use input_cache::{InputCache, InputCacheReport};
 pub use router::create_router_with_provider;
+pub(crate) use true_cache::TrueCache;

@@ -1,25 +1,29 @@
 import { useState, useEffect, useRef } from 'react'
-import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2 } from 'lucide-react'
+import { RefreshCw, LogOut, Moon, Sun, Server, Plus, Upload, FileUp, Trash2, RotateCcw, CheckCircle2, Activity, Eye, Network, Shuffle } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import { CredentialCard } from '@/components/credential-card'
 import { BalanceDialog } from '@/components/balance-dialog'
 import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { BatchImportDialog } from '@/components/batch-import-dialog'
 import { KamImportDialog } from '@/components/kam-import-dialog'
 import { BatchVerifyDialog, type VerifyResult } from '@/components/batch-verify-dialog'
-import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode } from '@/hooks/use-credentials'
+import { useCredentials, useDeleteCredential, useResetFailure, useLoadBalancingMode, useSetLoadBalancingMode, useCallLogs, useProxyPool, useAddProxyPoolItem, useDeleteProxyPoolItem, useAssignProxyPool } from '@/hooks/use-credentials'
 import { getCredentialBalance, forceRefreshToken } from '@/api/credentials'
 import { extractErrorMessage } from '@/lib/utils'
-import type { BalanceResponse } from '@/types/api'
+import type { BalanceResponse, CallLogRecord } from '@/types/api'
 
 interface DashboardProps {
   onLogout: () => void
 }
+
+type DashboardTab = 'credentials' | 'proxyPool' | 'callLogs'
 
 export function Dashboard({ onLogout }: DashboardProps) {
   const [selectedCredentialId, setSelectedCredentialId] = useState<number | null>(null)
@@ -38,8 +42,14 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [queryInfoProgress, setQueryInfoProgress] = useState({ current: 0, total: 0 })
   const [batchRefreshing, setBatchRefreshing] = useState(false)
   const [batchRefreshProgress, setBatchRefreshProgress] = useState({ current: 0, total: 0 })
+  const [selectedCallLog, setSelectedCallLog] = useState<CallLogRecord | null>(null)
+  const [proxyPoolDialogOpen, setProxyPoolDialogOpen] = useState(false)
+  const [proxyPoolUrl, setProxyPoolUrl] = useState('')
+  const [proxyPoolUsername, setProxyPoolUsername] = useState('')
+  const [proxyPoolPassword, setProxyPoolPassword] = useState('')
   const cancelVerifyRef = useRef(false)
   const [currentPage, setCurrentPage] = useState(1)
+  const [activeTab, setActiveTab] = useState<DashboardTab>('credentials')
   const itemsPerPage = 12
   const [darkMode, setDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -54,6 +64,11 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { mutate: resetFailure } = useResetFailure()
   const { data: loadBalancingData, isLoading: isLoadingMode } = useLoadBalancingMode()
   const { mutate: setLoadBalancingMode, isPending: isSettingMode } = useSetLoadBalancingMode()
+  const { data: callLogs, refetch: refetchCallLogs, isFetching: isFetchingCallLogs } = useCallLogs(20)
+  const { data: proxyPool, refetch: refetchProxyPool, isFetching: isFetchingProxyPool } = useProxyPool()
+  const { mutate: addProxyPoolItem, isPending: isAddingProxyPoolItem } = useAddProxyPoolItem()
+  const { mutate: deleteProxyPoolItem, isPending: isDeletingProxyPoolItem } = useDeleteProxyPoolItem()
+  const { mutate: assignProxyPool, isPending: isAssigningProxyPool } = useAssignProxyPool()
 
   // 计算分页
   const totalPages = Math.ceil((data?.credentials.length || 0) / itemsPerPage)
@@ -507,6 +522,118 @@ export function Dashboard({ onLogout }: DashboardProps) {
     })
   }
 
+  const resetProxyPoolForm = () => {
+    setProxyPoolUrl('')
+    setProxyPoolUsername('')
+    setProxyPoolPassword('')
+  }
+
+  const handleAddProxyPoolItem = () => {
+    const url = proxyPoolUrl.trim()
+    const username = proxyPoolUsername.trim()
+    const password = proxyPoolPassword.trim()
+
+    if (!url) {
+      toast.error('请填写代理地址')
+      return
+    }
+    if ((username && !password) || (!username && password)) {
+      toast.error('代理用户名和密码需要同时填写')
+      return
+    }
+
+    addProxyPoolItem(
+      {
+        url,
+        username: username || undefined,
+        password: password || undefined,
+      },
+      {
+        onSuccess: (response) => {
+          toast.success(response.message)
+          setProxyPoolDialogOpen(false)
+          resetProxyPoolForm()
+        },
+        onError: (error) => {
+          toast.error(`添加代理失败: ${extractErrorMessage(error)}`)
+        },
+      }
+    )
+  }
+
+  const handleDeleteProxyPoolItem = (id: string) => {
+    if (!confirm(`确定删除代理池条目 ${id} 吗？已分配到账号的代理不会被自动清除。`)) {
+      return
+    }
+
+    deleteProxyPoolItem(id, {
+      onSuccess: (response) => toast.success(response.message),
+      onError: (error) => toast.error(`删除代理失败: ${extractErrorMessage(error)}`),
+    })
+  }
+
+  const handleAssignProxyPoolAll = () => {
+    assignProxyPool(
+      { overwrite: false },
+      {
+        onSuccess: (response) => {
+          toast.success(`已分配 ${response.assignedCount} 个账号，使用 ${response.proxyCount} 个代理`)
+        },
+        onError: (error) => toast.error(`分配失败: ${extractErrorMessage(error)}`),
+      }
+    )
+  }
+
+  const handleAssignProxyPoolSelected = () => {
+    if (selectedIds.size === 0) {
+      toast.error('请先选择要分配代理的凭据')
+      return
+    }
+    if (!confirm(`确定覆盖 ${selectedIds.size} 个已选账号的代理配置吗？`)) {
+      return
+    }
+
+    assignProxyPool(
+      { credentialIds: Array.from(selectedIds), overwrite: true },
+      {
+        onSuccess: (response) => {
+          toast.success(`已覆盖分配 ${response.assignedCount} 个账号`)
+        },
+        onError: (error) => toast.error(`分配失败: ${extractErrorMessage(error)}`),
+      }
+    )
+  }
+
+  const formatTime = (value: string) => {
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) {
+      return value
+    }
+    return date.toLocaleString()
+  }
+
+  const formatCompactNumber = (value: number) => {
+    if (value >= 1_000_000) {
+      return `${(value / 1_000_000).toFixed(1)}m`
+    }
+    if (value >= 10_000) {
+      return `${(value / 1_000).toFixed(1)}k`
+    }
+    return value.toString()
+  }
+
+  const getInputCachePercent = (record: CallLogRecord) => {
+    if (record.inputCacheHitRate === undefined) {
+      return 0
+    }
+    return Math.round(record.inputCacheHitRate * 100)
+  }
+
+  const hasInputCacheHit = (record: CallLogRecord) =>
+    (record.savedInputTokens ?? 0) > 0 || getInputCachePercent(record) > 0
+
+  const renderJson = (value: unknown) => JSON.stringify(value ?? null, null, 2)
+
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
@@ -606,7 +733,225 @@ export function Dashboard({ onLogout }: DashboardProps) {
           </Card>
         </div>
 
+        <div className="mb-6 flex gap-2 overflow-x-auto rounded-lg border bg-muted/30 p-1">
+          <Button
+            variant={activeTab === 'credentials' ? 'default' : 'ghost'}
+            size="sm"
+            onClick={() => setActiveTab('credentials')}
+            className="shrink-0"
+          >
+            账号池
+            <Badge variant={activeTab === 'credentials' ? 'secondary' : 'outline'}>
+              {data?.credentials.length ?? 0}
+            </Badge>
+          </Button>
+          <Button
+            variant={activeTab === 'proxyPool' ? 'default' : 'ghost'}
+            size="sm"
+            onClick={() => setActiveTab('proxyPool')}
+            className="shrink-0"
+          >
+            代理池
+            <Badge variant={activeTab === 'proxyPool' ? 'secondary' : 'outline'}>
+              {proxyPool?.proxies.length ?? 0}
+            </Badge>
+          </Button>
+          <Button
+            variant={activeTab === 'callLogs' ? 'default' : 'ghost'}
+            size="sm"
+            onClick={() => setActiveTab('callLogs')}
+            className="shrink-0"
+          >
+            调用记录
+            <Badge variant={activeTab === 'callLogs' ? 'secondary' : 'outline'}>
+              {callLogs?.total ?? 0}
+            </Badge>
+          </Button>
+        </div>
+
+        {activeTab === 'proxyPool' && (
+        <div className="mb-6">
+          <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="flex items-center gap-2">
+              <Network className="h-5 w-5" />
+              <h2 className="text-xl font-semibold">代理池</h2>
+              <Badge variant="secondary">{proxyPool?.proxies.length ?? 0} 个代理</Badge>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => refetchProxyPool()}
+                disabled={isFetchingProxyPool}
+              >
+                <RefreshCw className={`h-4 w-4 mr-2 ${isFetchingProxyPool ? 'animate-spin' : ''}`} />
+                刷新
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleAssignProxyPoolAll}
+                disabled={isAssigningProxyPool || !proxyPool?.proxies.length}
+              >
+                <Shuffle className="h-4 w-4 mr-2" />
+                分配未配置账号
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleAssignProxyPoolSelected}
+                disabled={isAssigningProxyPool || selectedIds.size === 0 || !proxyPool?.proxies.length}
+              >
+                <Shuffle className="h-4 w-4 mr-2" />
+                覆盖已选账号
+              </Button>
+              <Button size="sm" onClick={() => setProxyPoolDialogOpen(true)}>
+                <Plus className="h-4 w-4 mr-2" />
+                添加代理
+              </Button>
+            </div>
+          </div>
+          <div className="overflow-hidden rounded-lg border">
+            <div className="hidden md:grid md:grid-cols-[1fr_120px_120px_90px] gap-3 border-b bg-muted/50 px-4 py-2 text-xs font-medium text-muted-foreground">
+              <span>代理地址</span>
+              <span>认证</span>
+              <span>已分配</span>
+              <span className="text-right">操作</span>
+            </div>
+            {proxyPool?.proxies?.length ? (
+              proxyPool.proxies.map((proxy) => (
+                <div
+                  key={proxy.id}
+                  className="grid grid-cols-1 gap-2 border-b px-4 py-3 text-sm last:border-b-0 md:grid-cols-[1fr_120px_120px_90px] md:items-center md:gap-3"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate font-medium" title={proxy.url}>{proxy.url}</div>
+                    <div className="text-xs text-muted-foreground">{proxy.id}</div>
+                  </div>
+                  <div>
+                    <Badge variant={proxy.hasAuth ? 'secondary' : 'outline'}>
+                      {proxy.hasAuth ? '有认证' : '无认证'}
+                    </Badge>
+                  </div>
+                  <div className="text-xs">
+                    <div>{proxy.assignedCount} 个账号</div>
+                    <div className="truncate text-muted-foreground">
+                      {proxy.assignedCredentialIds.length ? `#${proxy.assignedCredentialIds.join(', #')}` : '-'}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => handleDeleteProxyPoolItem(proxy.id)}
+                      disabled={isDeletingProxyPoolItem}
+                      title="删除代理"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="px-4 py-6 text-center text-sm text-muted-foreground">
+                暂无代理
+              </div>
+            )}
+          </div>
+        </div>
+        )}
+
+        {activeTab === 'callLogs' && (
+        <div className="mb-6">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Activity className="h-5 w-5" />
+              <h2 className="text-xl font-semibold">调用记录</h2>
+              {callLogs?.enabled === false && (
+                <Badge variant="outline">未启用</Badge>
+              )}
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => refetchCallLogs()}
+              disabled={isFetchingCallLogs}
+            >
+              <RefreshCw className={`h-4 w-4 mr-2 ${isFetchingCallLogs ? 'animate-spin' : ''}`} />
+              刷新
+            </Button>
+          </div>
+          <div className="overflow-hidden rounded-lg border">
+            <div className="hidden md:grid md:grid-cols-[minmax(150px,1.2fr)_minmax(140px,1fr)_130px_120px_110px_90px] gap-3 border-b bg-muted/50 px-4 py-2 text-xs font-medium text-muted-foreground">
+              <span>时间</span>
+              <span>模型</span>
+              <span>缓存</span>
+              <span>Token</span>
+              <span>凭据/耗时</span>
+              <span className="text-right">操作</span>
+            </div>
+            {callLogs?.records?.length ? (
+              callLogs.records.map((record) => (
+                <div
+                  key={record.id}
+                  className="grid grid-cols-1 gap-2 border-b px-4 py-3 text-sm last:border-b-0 md:grid-cols-[minmax(150px,1.2fr)_minmax(140px,1fr)_130px_120px_110px_90px] md:gap-3"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate">{formatTime(record.createdAt)}</div>
+                    <div className="text-xs text-muted-foreground">{record.stream ? 'stream' : 'json'} · {record.endpoint}</div>
+                  </div>
+                  <div className="min-w-0 truncate" title={record.model}>{record.model}</div>
+                  <div className="flex flex-wrap gap-1">
+                    <Badge variant={record.cacheState === 'hit' ? 'success' : 'secondary'}>
+                      true {record.cacheState}
+                    </Badge>
+                    {hasInputCacheHit(record) && (
+                      <Badge variant="success">
+                        input {getInputCachePercent(record)}%
+                      </Badge>
+                    )}
+                    {!hasInputCacheHit(record) && record.prefixCacheState && record.prefixCacheState !== 'bypass' && (
+                      <Badge variant="outline">
+                        input {record.prefixCacheState}
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="text-xs">
+                    <div>in {record.inputTokens ?? '-'}</div>
+                    <div>out {record.outputTokens ?? '-'}</div>
+                    {hasInputCacheHit(record) && (
+                      <div className="text-emerald-600">
+                        saved {formatCompactNumber(record.savedInputTokens ?? 0)} ({getInputCachePercent(record)}%)
+                      </div>
+                    )}
+                  </div>
+                  <div className="text-xs">
+                    <div>#{record.credentialId ?? '-'}</div>
+                    <div>{record.durationMs}ms</div>
+                  </div>
+                  <div className="text-right">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => setSelectedCallLog(record)}
+                      title="查看详情"
+                    >
+                      <Eye className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="px-4 py-6 text-center text-sm text-muted-foreground">
+                暂无调用记录
+              </div>
+            )}
+          </div>
+        </div>
+        )}
+
         {/* 凭据列表 */}
+        {activeTab === 'credentials' && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
@@ -745,6 +1090,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
             </>
           )}
         </div>
+        )}
       </main>
 
       {/* 余额对话框 */}
@@ -781,6 +1127,135 @@ export function Dashboard({ onLogout }: DashboardProps) {
         results={verifyResults}
         onCancel={handleCancelVerify}
       />
+
+      <Dialog
+        open={proxyPoolDialogOpen}
+        onOpenChange={(open) => {
+          setProxyPoolDialogOpen(open)
+          if (!open) {
+            resetProxyPoolForm()
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>添加代理</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">代理地址</label>
+              <Input
+                value={proxyPoolUrl}
+                onChange={(event) => setProxyPoolUrl(event.target.value)}
+                placeholder="socks5://127.0.0.1:1080"
+              />
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">用户名</label>
+                <Input
+                  value={proxyPoolUsername}
+                  onChange={(event) => setProxyPoolUsername(event.target.value)}
+                  placeholder="可选"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">密码</label>
+                <Input
+                  type="password"
+                  value={proxyPoolPassword}
+                  onChange={(event) => setProxyPoolPassword(event.target.value)}
+                  placeholder="可选"
+                />
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setProxyPoolDialogOpen(false)}
+              disabled={isAddingProxyPoolItem}
+            >
+              取消
+            </Button>
+            <Button onClick={handleAddProxyPoolItem} disabled={isAddingProxyPoolItem}>
+              添加
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={selectedCallLog !== null} onOpenChange={(open) => !open && setSelectedCallLog(null)}>
+        <DialogContent className="max-w-5xl max-h-[86vh] overflow-hidden">
+          <DialogHeader>
+            <DialogTitle>调用详情</DialogTitle>
+          </DialogHeader>
+          {selectedCallLog && (
+            <div className="grid min-h-0 gap-4 overflow-y-auto md:grid-cols-2">
+              <div className="space-y-2 text-sm">
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant={selectedCallLog.status === 'success' ? 'success' : 'destructive'}>
+                    {selectedCallLog.status}
+                  </Badge>
+                  <Badge variant={selectedCallLog.cacheState === 'hit' ? 'success' : 'secondary'}>
+                    true {selectedCallLog.cacheState}
+                  </Badge>
+                  {hasInputCacheHit(selectedCallLog) && (
+                    <Badge variant="success">input {getInputCachePercent(selectedCallLog)}%</Badge>
+                  )}
+                  <Badge variant="outline">HTTP {selectedCallLog.httpStatus}</Badge>
+                </div>
+                <div className="break-words">模型：{selectedCallLog.model}</div>
+                <div>凭据：#{selectedCallLog.credentialId ?? '-'}</div>
+                <div>耗时：{selectedCallLog.durationMs}ms</div>
+                <div>输入：{selectedCallLog.inputTokens ?? '-'}，输出：{selectedCallLog.outputTokens ?? '-'}</div>
+                {selectedCallLog.rawInputTokens !== undefined && (
+                  <div>
+                    输入缓存：省 {selectedCallLog.savedInputTokens ?? 0} / 原始 {selectedCallLog.rawInputTokens}
+                    {selectedCallLog.estimatedBillableInputTokens !== undefined && (
+                      <>，估算计费 {selectedCallLog.estimatedBillableInputTokens}</>
+                    )}
+                    {selectedCallLog.inputCacheHitRate !== undefined && (
+                      <>，命中 {Math.round(selectedCallLog.inputCacheHitRate * 100)}%</>
+                    )}
+                  </div>
+                )}
+                {selectedCallLog.prefixCacheState && (
+                  <div>
+                    前缀缓存：{selectedCallLog.prefixCacheState}
+                    {selectedCallLog.inputCacheTtlSecs !== undefined && (
+                      <>（TTL {selectedCallLog.inputCacheTtlSecs}s）</>
+                    )}
+                  </div>
+                )}
+                {selectedCallLog.toolResultCacheState && (
+                  <div>工具结果缓存：{selectedCallLog.toolResultCacheState}</div>
+                )}
+                {selectedCallLog.cacheReadInputTokens !== undefined && (
+                  <div>缓存读取：{selectedCallLog.cacheReadInputTokens}</div>
+                )}
+                {selectedCallLog.error && (
+                  <div className="break-words text-destructive">{selectedCallLog.error}</div>
+                )}
+              </div>
+              <div className="grid gap-4 md:col-span-2 md:grid-cols-2">
+                <div className="min-w-0">
+                  <div className="mb-2 text-sm font-medium">Request</div>
+                  <pre className="max-h-80 overflow-auto rounded-md border bg-muted p-3 text-xs">
+                    {renderJson(selectedCallLog.request)}
+                  </pre>
+                </div>
+                <div className="min-w-0">
+                  <div className="mb-2 text-sm font-medium">Response</div>
+                  <pre className="max-h-80 overflow-auto rounded-md border bg-muted p-3 text-xs">
+                    {renderJson(selectedCallLog.response)}
+                  </pre>
+                </div>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
