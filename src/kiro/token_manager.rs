@@ -174,6 +174,10 @@ fn is_reqwest_transport_error(err: &reqwest::Error) -> bool {
     err.is_request() || err.is_connect() || err.is_timeout() || err.is_body() || err.is_decode()
 }
 
+fn is_refresh_token_invalid_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<RefreshTokenInvalidError>().is_some()
+}
+
 fn refresh_timeout_secs(proxy: Option<&ProxyConfig>) -> u64 {
     if proxy.is_some() {
         PROXY_REFRESH_TIMEOUT_SECS
@@ -1079,7 +1083,7 @@ impl MultiTokenManager {
                 }
                 Err(e) => {
                     // refreshToken 永久失效 → 立即禁用，不累计重试
-                    let has_available = if e.downcast_ref::<RefreshTokenInvalidError>().is_some() {
+                    let has_available = if is_refresh_token_invalid_error(&e) {
                         tracing::warn!("凭据 #{} refreshToken 永久失效: {}", id, e);
                         self.report_refresh_token_invalid(id)
                     } else {
@@ -1578,8 +1582,8 @@ impl MultiTokenManager {
 
     /// 报告指定凭据刷新 Token 失败。
     ///
-    /// 连续刷新失败达到阈值后禁用凭据并切换，阈值内保持当前凭据不切换，
-    /// 与 API 401/403 的累计失败策略保持一致。
+    /// 刷新失败后立即切换到其他可用凭据，避免坏代理/坏 token 阻塞请求池。
+    /// 连续刷新失败达到阈值后禁用凭据。
     pub fn report_refresh_failure(&self, id: u64) -> bool {
         let result = {
             let mut entries = self.entries.lock();
@@ -1607,6 +1611,20 @@ impl MultiTokenManager {
             );
 
             if refresh_failure_count < MAX_FAILURES_PER_CREDENTIAL {
+                if *current_id == id {
+                    if let Some(next) = entries
+                        .iter()
+                        .filter(|e| !e.disabled && e.id != id)
+                        .min_by_key(|e| e.credentials.priority)
+                    {
+                        *current_id = next.id;
+                        tracing::info!(
+                            "Token 刷新失败后已临时切换到凭据 #{}（优先级 {}）",
+                            next.id,
+                            next.credentials.priority
+                        );
+                    }
+                }
                 return entries.iter().any(|e| !e.disabled);
             }
 
@@ -2119,8 +2137,19 @@ impl MultiTokenManager {
                 if is_token_expired(&current_creds) || is_token_expiring_soon(&current_creds) {
                     let effective_proxy = current_creds.effective_proxy(self.proxy.as_ref());
                     let new_creds =
-                        refresh_token(&current_creds, &self.config, effective_proxy.as_ref())
-                            .await?;
+                        match refresh_token(&current_creds, &self.config, effective_proxy.as_ref())
+                            .await
+                        {
+                            Ok(new_creds) => new_creds,
+                            Err(e) => {
+                                if is_refresh_token_invalid_error(&e) {
+                                    self.report_refresh_token_invalid(id);
+                                } else {
+                                    self.report_refresh_failure(id);
+                                }
+                                return Err(e);
+                            }
+                        };
                     {
                         let mut entries = self.entries.lock();
                         if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
@@ -2396,6 +2425,10 @@ impl MultiTokenManager {
     /// 无条件调用上游 API 重新获取 access token，不检查是否过期。
     /// 适用于排查问题、Token 异常但未过期、主动更新凭据状态等场景。
     pub async fn force_refresh_token_for(&self, id: u64) -> anyhow::Result<()> {
+        // 获取刷新锁防止并发刷新
+        let _guard = self.refresh_lock.lock().await;
+
+        // 拿到刷新锁后重新读取最新凭据，避免并发刷新刚刚轮换了 refreshToken。
         let credentials = {
             let entries = self.entries.lock();
             entries
@@ -2405,12 +2438,20 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
         };
 
-        // 获取刷新锁防止并发刷新
-        let _guard = self.refresh_lock.lock().await;
-
         // 无条件调用 refresh_token
         let effective_proxy = credentials.effective_proxy(self.proxy.as_ref());
-        let new_creds = refresh_token(&credentials, &self.config, effective_proxy.as_ref()).await?;
+        let new_creds =
+            match refresh_token(&credentials, &self.config, effective_proxy.as_ref()).await {
+                Ok(new_creds) => new_creds,
+                Err(e) => {
+                    if is_refresh_token_invalid_error(&e) {
+                        self.report_refresh_token_invalid(id);
+                    } else {
+                        self.report_refresh_failure(id);
+                    }
+                    return Err(e);
+                }
+            };
 
         // 更新 entries 中对应凭据
         {
@@ -3206,7 +3247,11 @@ mod tests {
             MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
 
         assert_eq!(manager.available_count(), 2);
-        for _ in 0..(MAX_FAILURES_PER_CREDENTIAL - 1) {
+        assert!(manager.report_refresh_failure(1));
+        assert_eq!(manager.available_count(), 2);
+        assert_eq!(manager.snapshot().current_id, 2);
+
+        for _ in 0..(MAX_FAILURES_PER_CREDENTIAL - 2) {
             assert!(manager.report_refresh_failure(1));
         }
         assert_eq!(manager.available_count(), 2);
