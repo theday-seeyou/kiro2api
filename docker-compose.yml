@@ -1,9 +1,9 @@
 services:
-  kiro-rs:
+  kiro2api:
     # 使用国内镜像
-    # image: ghcr.nju.edu.cn/${IMAGE_OWNER:-hank9999}/kiro-rs:${IMAGE_TAG:-latest}
-    image: ghcr.io/${IMAGE_OWNER:-hank9999}/kiro-rs:${IMAGE_TAG:-latest}
-    container_name: kiro-rs
+    # image: ghcr.nju.edu.cn/${IMAGE_OWNER:-luohui1}/kiro2api:${IMAGE_TAG:-latest}
+    image: ghcr.io/${IMAGE_OWNER:-luohui1}/kiro2api:${IMAGE_TAG:-latest}
+    container_name: kiro2api
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -14,4 +14,4 @@ services:
 
 networks:
   default:
-    name: kiro-rs_default
+    name: kiro2api_default

@@ -1,7 +1,5 @@
 import { useState, useEffect } from 'react'
-import { KeyRound } from 'lucide-react'
 import { storage } from '@/lib/storage'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 
@@ -29,18 +27,13 @@ export function LoginPage({ onLogin }: LoginPageProps) {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background p-4">
-      <Card className="w-full max-w-md">
-        <CardHeader className="text-center">
-          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
-            <KeyRound className="h-6 w-6 text-primary" />
-          </div>
-          <CardTitle className="text-2xl">Kiro Admin</CardTitle>
-          <CardDescription>
-            请输入 Admin API Key 以访问管理面板
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
+    <div className="login-body">
+      <div className="login-bg" />
+      <div className="login-shell">
+        <div className="login-card">
+          <div className="login-brand">kiro2api Admin</div>
+          <div className="login-title">管理控制台</div>
+          <div className="login-subtitle">输入 Admin API Key 访问账号池、代理池和调用记录。</div>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
               <Input
@@ -48,15 +41,15 @@ export function LoginPage({ onLogin }: LoginPageProps) {
                 placeholder="Admin API Key"
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                className="text-center"
+                className="input h-[34px] rounded-lg text-left"
               />
             </div>
-            <Button type="submit" className="w-full" disabled={!apiKey.trim()}>
+            <Button type="submit" className="btn btn-primary w-full" disabled={!apiKey.trim()}>
               登录
             </Button>
           </form>
-        </CardContent>
-      </Card>
+        </div>
+      </div>
     </div>
   )
 }

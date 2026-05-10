@@ -140,6 +140,7 @@ pub struct AssignProxyPoolRequest {
     pub credential_ids: Option<Vec<u64>>,
     #[serde(default)]
     pub overwrite: bool,
+    pub max_credentials_per_proxy: Option<usize>,
 }
 
 /// 设置代理池条目禁用状态请求

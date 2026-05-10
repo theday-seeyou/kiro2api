@@ -95,6 +95,7 @@ export interface AddProxyPoolItemRequest {
 export interface AssignProxyPoolRequest {
   credentialIds?: number[]
   overwrite?: boolean
+  maxCredentialsPerProxy?: number
 }
 
 export interface ProxyPoolAssignment {
@@ -105,6 +106,7 @@ export interface ProxyPoolAssignment {
 
 export interface ProxyPoolAssignResponse {
   assignedCount: number
+  skippedCount?: number
   proxyCount: number
   assignments: ProxyPoolAssignment[]
 }

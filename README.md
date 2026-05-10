@@ -1,8 +1,8 @@
-# kiro.rs
+# kiro2api
 
 基于 Kiro 的 Anthropic Claude API 兼容网关。当前仓库不是原版上游，而是在老项目基础上做过较多运营向改造的分支，重点是多账号池、代理池、调用记录、缓存观测、NewAPI 兼容 usage 字段和 Admin 管理能力。
 
-> 本项目基于老项目 [hank9999/kiro.rs](https://github.com/hank9999/kiro.rs) 二次开发，并参考了 [caidaoli/kiro2api](https://github.com/caidaoli/kiro2api)、[Quorinex/Kiro-Go](https://github.com/Quorinex/Kiro-Go) 等同类实现的思路。感谢原作者和社区项目。
+> 本项目基于老项目 [hank9999/kiro.rs](https://github.com/hank9999/kiro.rs) 二次开发，并参考了 [caidaoli/kiro2api](https://github.com/caidaoli/kiro2api)、[Quorinex/Kiro-Go](https://github.com/Quorinex/Kiro-Go) 等同类实现的思路；Admin UI 的视觉与交互也参考了 [chenyme/grok2api](https://github.com/chenyme/grok2api)。感谢原作者和社区项目。
 
 ## 免责声明
 
@@ -49,7 +49,7 @@ cargo build --release
 {
   "host": "127.0.0.1",
   "port": 8990,
-  "apiKey": "sk-kiro-rs-your-client-key",
+  "apiKey": "sk-kiro2api-your-client-key",
   "tlsBackend": "rustls",
   "region": "us-east-1",
   "adminApiKey": "sk-admin-your-secret-key",
@@ -105,13 +105,13 @@ Kiro API Key 凭据示例：
 ### 3. 启动
 
 ```bash
-./target/release/kiro-rs
+./target/release/kiro2api
 ```
 
 或显式指定配置文件：
 
 ```bash
-./target/release/kiro-rs -c /path/to/config.json --credentials /path/to/credentials.json
+./target/release/kiro2api -c /path/to/config.json --credentials /path/to/credentials.json
 ```
 
 ### 4. 验证
@@ -119,7 +119,7 @@ Kiro API Key 凭据示例：
 ```bash
 curl http://127.0.0.1:8990/v1/messages \
   -H "Content-Type: application/json" \
-  -H "x-api-key: sk-kiro-rs-your-client-key" \
+  -H "x-api-key: sk-kiro2api-your-client-key" \
   -d '{
     "model": "claude-sonnet-4-20250514",
     "max_tokens": 1024,
@@ -186,7 +186,7 @@ docker compose up -d --build
 {
   "host": "127.0.0.1",
   "port": 8990,
-  "apiKey": "sk-kiro-rs-qazWSXedcRFV123456",
+  "apiKey": "sk-kiro2api-qazWSXedcRFV123456",
   "tlsBackend": "rustls",
   "region": "us-east-1",
   "adminApiKey": "sk-admin-your-secret-key",
@@ -433,4 +433,5 @@ Admin API 认证支持 `x-api-key: <adminApiKey>` 或 `Authorization: Bearer <ad
 - [hank9999/kiro.rs](https://github.com/hank9999/kiro.rs)：本仓库的老项目/上游来源。
 - [caidaoli/kiro2api](https://github.com/caidaoli/kiro2api)：同类型 Kiro 转 API 项目参考。
 - [Quorinex/Kiro-Go](https://github.com/Quorinex/Kiro-Go)：同类型 Go 实现参考。
+- [chenyme/grok2api](https://github.com/chenyme/grok2api)：Admin UI 视觉风格与交互组织参考。
 - [proxycast](https://github.com/aiclientproxy/proxycast)：代理与转换思路参考。

@@ -268,7 +268,11 @@ impl AdminService {
         }
 
         self.token_manager
-            .assign_proxy_pool(req.credential_ids, req.overwrite)
+            .assign_proxy_pool(
+                req.credential_ids,
+                req.overwrite,
+                req.max_credentials_per_proxy.filter(|limit| *limit > 0),
+            )
             .map_err(|e| self.classify_proxy_pool_error(e))
     }
 

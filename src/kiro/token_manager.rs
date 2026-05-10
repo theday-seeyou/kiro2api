@@ -636,6 +636,8 @@ pub struct ManagerSnapshot {
 pub struct ProxyPoolAssignResult {
     /// 本次被写入代理配置的凭据数
     pub assigned_count: usize,
+    /// 因为没有可用代理容量而跳过的凭据数
+    pub skipped_count: usize,
     /// 参与分配的可用代理数量
     pub proxy_count: usize,
     /// 具体分配明细：(凭据 ID, 代理池条目 ID)
@@ -1958,6 +1960,7 @@ impl MultiTokenManager {
         &self,
         credential_ids: Option<Vec<u64>>,
         overwrite: bool,
+        max_credentials_per_proxy: Option<usize>,
     ) -> anyhow::Result<ProxyPoolAssignResult> {
         let proxies: Vec<ProxyPoolItem> = self
             .proxy_pool
@@ -1975,6 +1978,7 @@ impl MultiTokenManager {
             credential_ids.map(|ids| ids.into_iter().collect());
 
         let mut assignments = Vec::new();
+        let mut skipped_count = 0usize;
         {
             let mut entries = self.entries.lock();
 
@@ -2018,9 +2022,19 @@ impl MultiTokenManager {
                 let proxy_index = proxy_loads
                     .iter()
                     .enumerate()
+                    .filter(|(_, count)| {
+                        max_credentials_per_proxy
+                            .map(|limit| **count < limit)
+                            .unwrap_or(true)
+                    })
                     .min_by_key(|(index, count)| (*count, *index))
-                    .map(|(index, _)| index)
-                    .expect("proxies is not empty");
+                    .map(|(index, _)| index);
+
+                let Some(proxy_index) = proxy_index else {
+                    skipped_count += 1;
+                    continue;
+                };
+
                 proxy_loads[proxy_index] += 1;
                 let proxy = &proxies[proxy_index];
 
@@ -2041,6 +2055,7 @@ impl MultiTokenManager {
 
         Ok(ProxyPoolAssignResult {
             assigned_count: assignments.len(),
+            skipped_count,
             proxy_count: proxies.len(),
             assignments,
         })
@@ -3022,9 +3037,10 @@ mod tests {
         let manager =
             MultiTokenManager::new(config, vec![cred1, cred2, cred3], None, None, false).unwrap();
 
-        let result = manager.assign_proxy_pool(None, false).unwrap();
+        let result = manager.assign_proxy_pool(None, false, None).unwrap();
 
         assert_eq!(result.assigned_count, 2);
+        assert_eq!(result.skipped_count, 0);
         let snapshot = manager.snapshot();
         let by_id: std::collections::HashMap<_, _> =
             snapshot.entries.into_iter().map(|e| (e.id, e)).collect();
@@ -3039,6 +3055,56 @@ mod tests {
         assert_eq!(
             by_id.get(&3).unwrap().proxy_url.as_deref(),
             Some("http://proxy-two:8080")
+        );
+    }
+
+    #[test]
+    fn test_assign_proxy_pool_respects_max_credentials_per_proxy() {
+        let mut config = Config::default();
+        config.proxy_pool = vec![
+            crate::model::config::ProxyPoolItem {
+                id: "p1".to_string(),
+                url: "socks5://proxy-one:1080".to_string(),
+                username: None,
+                password: None,
+                disabled: false,
+            },
+            crate::model::config::ProxyPoolItem {
+                id: "p2".to_string(),
+                url: "http://proxy-two:8080".to_string(),
+                username: None,
+                password: None,
+                disabled: false,
+            },
+        ];
+
+        let mut cred1 = KiroCredentials::default();
+        cred1.id = Some(1);
+        let mut cred2 = KiroCredentials::default();
+        cred2.id = Some(2);
+        let mut cred3 = KiroCredentials::default();
+        cred3.id = Some(3);
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2, cred3], None, None, false).unwrap();
+
+        let result = manager.assign_proxy_pool(None, false, Some(1)).unwrap();
+
+        assert_eq!(result.assigned_count, 2);
+        assert_eq!(result.skipped_count, 1);
+
+        let assigned_proxy_urls: Vec<_> = manager
+            .snapshot()
+            .entries
+            .into_iter()
+            .filter_map(|entry| entry.proxy_url)
+            .collect();
+        assert_eq!(
+            assigned_proxy_urls,
+            vec![
+                "socks5://proxy-one:1080".to_string(),
+                "http://proxy-two:8080".to_string()
+            ]
         );
     }
 
