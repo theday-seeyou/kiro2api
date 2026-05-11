@@ -548,6 +548,8 @@ enum DisabledReason {
     TooManyFailures,
     /// 上游明确限流后的临时冷却
     RateLimited,
+    /// 代理或网络传输错误后的短暂冷却
+    TransportError,
     /// Token 刷新连续失败达到阈值后自动禁用
     TooManyRefreshFailures,
     /// 额度已用尽（如 MONTHLY_REQUEST_COUNT）
@@ -690,6 +692,8 @@ const MAX_FAILURES_PER_CREDENTIAL: u32 = 3;
 const RATE_LIMIT_BASE_COOLDOWN: StdDuration = StdDuration::from_secs(5 * 60);
 /// 明确限流后的最大冷却时间
 const RATE_LIMIT_MAX_COOLDOWN: StdDuration = StdDuration::from_secs(30 * 60);
+/// 代理/网络传输错误后的短冷却，避免坏链路拖垮整次请求
+const TRANSPORT_ERROR_COOLDOWN: StdDuration = StdDuration::from_secs(60);
 /// 统计数据持久化防抖间隔
 const STATS_SAVE_DEBOUNCE: StdDuration = StdDuration::from_secs(30);
 
@@ -726,17 +730,28 @@ fn recover_expired_rate_limits(entries: &mut [CredentialEntry]) -> usize {
     let mut recovered = 0;
 
     for entry in entries.iter_mut() {
-        if entry.disabled_reason != Some(DisabledReason::RateLimited) {
+        if !matches!(
+            entry.disabled_reason,
+            Some(DisabledReason::RateLimited | DisabledReason::TransportError)
+        ) {
             continue;
         }
 
         if entry.rate_limited_until.is_none_or(|until| until <= now) {
+            let reason = entry.disabled_reason;
             entry.disabled = false;
             entry.disabled_reason = None;
             entry.rate_limited_until = None;
             entry.failure_count = 0;
             recovered += 1;
-            tracing::info!("凭据 #{} 限流冷却结束，已自动恢复", entry.id);
+            match reason {
+                Some(DisabledReason::TransportError) => {
+                    tracing::info!("凭据 #{} 传输错误冷却结束，已自动恢复", entry.id);
+                }
+                _ => {
+                    tracing::info!("凭据 #{} 限流冷却结束，已自动恢复", entry.id);
+                }
+            }
         }
     }
 
@@ -1529,6 +1544,57 @@ impl MultiTokenManager {
         result
     }
 
+    /// 报告指定凭据遇到代理/网络传输错误。
+    ///
+    /// 传输错误多由代理不可达、代理协议不匹配、DNS/握手超时等链路问题导致。
+    /// 这里只做短暂冷却并切换凭据，不把账号永久禁用，也不混入上游限流状态。
+    pub fn report_transport_error(&self, id: u64) -> bool {
+        let result = {
+            let mut entries = self.entries.lock();
+            recover_expired_rate_limits(&mut entries);
+            let mut current_id = self.current_id.lock();
+
+            let entry = match entries.iter_mut().find(|e| e.id == id) {
+                Some(e) => e,
+                None => return entries.iter().any(|e| !e.disabled),
+            };
+
+            if entry.disabled && entry.disabled_reason != Some(DisabledReason::TransportError) {
+                return entries.iter().any(|e| !e.disabled);
+            }
+
+            entry.last_used_at = Some(Utc::now().to_rfc3339());
+            entry.disabled = true;
+            entry.disabled_reason = Some(DisabledReason::TransportError);
+            entry.rate_limited_until = Some(Instant::now() + TRANSPORT_ERROR_COOLDOWN);
+
+            tracing::warn!(
+                "凭据 #{} 遇到代理/网络传输错误，冷却 {} 秒后自动恢复，尝试切换到其他凭据",
+                id,
+                TRANSPORT_ERROR_COOLDOWN.as_secs()
+            );
+
+            if let Some(next) = entries
+                .iter()
+                .filter(|e| !e.disabled && e.id != id)
+                .min_by_key(|e| e.credentials.priority)
+            {
+                *current_id = next.id;
+                tracing::info!(
+                    "传输错误后已切换到凭据 #{}（优先级 {}）",
+                    next.id,
+                    next.credentials.priority
+                );
+            } else if !entries.iter().any(|e| !e.disabled) {
+                tracing::error!("所有凭据均处于禁用或冷却状态！");
+            }
+
+            entries.iter().any(|e| !e.disabled)
+        };
+        self.save_stats_debounced();
+        result
+    }
+
     /// 报告指定凭据额度已用尽
     ///
     /// 用于处理 402 Payment Required 且 reason 为 `MONTHLY_REQUEST_COUNT` 的场景：
@@ -1802,6 +1868,7 @@ impl MultiTokenManager {
                                 DisabledReason::Manual => "Manual",
                                 DisabledReason::TooManyFailures => "TooManyFailures",
                                 DisabledReason::RateLimited => "RateLimited",
+                                DisabledReason::TransportError => "TransportError",
                                 DisabledReason::TooManyRefreshFailures => "TooManyRefreshFailures",
                                 DisabledReason::QuotaExceeded => "QuotaExceeded",
                                 DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
@@ -2909,6 +2976,56 @@ mod tests {
         let first = snapshot.entries.iter().find(|e| e.id == 1).unwrap();
         assert!(!first.disabled);
         assert_eq!(first.failure_count, 0);
+        assert_eq!(first.disabled_reason, None);
+        assert!(first.rate_limited_until.is_none());
+        assert_eq!(snapshot.current_id, 2);
+    }
+
+    #[test]
+    fn test_multi_token_manager_report_transport_error_enters_short_cooldown() {
+        let config = Config::default();
+        let cred1 = KiroCredentials::default();
+        let cred2 = KiroCredentials::default();
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        assert_eq!(manager.snapshot().current_id, 1);
+        assert!(manager.report_transport_error(1));
+
+        let snapshot = manager.snapshot();
+        let first = snapshot.entries.iter().find(|e| e.id == 1).unwrap();
+        assert!(first.disabled);
+        assert_eq!(first.failure_count, 0);
+        assert_eq!(first.disabled_reason.as_deref(), Some("TransportError"));
+        assert!(first.rate_limited_until.is_some());
+        assert!(first.rate_limit_cooldown_secs.is_some());
+        assert_eq!(snapshot.current_id, 2);
+        assert_eq!(manager.available_count(), 1);
+    }
+
+    #[test]
+    fn test_multi_token_manager_transport_error_cooldown_auto_recovers() {
+        let config = Config::default();
+        let cred1 = KiroCredentials::default();
+        let cred2 = KiroCredentials::default();
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        assert!(manager.report_transport_error(1));
+        assert_eq!(manager.available_count(), 1);
+
+        {
+            let mut entries = manager.entries.lock();
+            let first = entries.iter_mut().find(|e| e.id == 1).unwrap();
+            first.rate_limited_until = Some(Instant::now() - std::time::Duration::from_secs(1));
+        }
+
+        assert_eq!(manager.available_count(), 2);
+        let snapshot = manager.snapshot();
+        let first = snapshot.entries.iter().find(|e| e.id == 1).unwrap();
+        assert!(!first.disabled);
         assert_eq!(first.disabled_reason, None);
         assert!(first.rate_limited_until.is_none());
         assert_eq!(snapshot.current_id, 2);

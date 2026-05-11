@@ -105,6 +105,14 @@ impl KiroProvider {
             .ok_or_else(|| anyhow::anyhow!("未知端点: {}", name))
     }
 
+    fn proxy_label(&self, credentials: &KiroCredentials) -> String {
+        match credentials.proxy_url.as_deref() {
+            Some(url) => sanitize_proxy_url(url),
+            None if self.global_proxy.is_some() => "global".to_string(),
+            None => "direct".to_string(),
+        }
+    }
+
     /// 发送非流式 API 请求
     ///
     /// 支持多凭据故障转移（见 [`Self::call_api_with_retry`]）
@@ -173,13 +181,20 @@ impl KiroProvider {
             let response = match request.send().await {
                 Ok(resp) => resp,
                 Err(e) => {
+                    let proxy = self.proxy_label(&ctx.credentials);
+                    let has_available = self.token_manager.report_transport_error(ctx.id);
                     tracing::warn!(
-                        "MCP 请求发送失败（尝试 {}/{}）: {}",
+                        "MCP 请求发送失败（凭据 #{}, proxy={}, 尝试 {}/{}）: {}",
+                        ctx.id,
+                        proxy,
                         attempt + 1,
                         max_retries,
                         e
                     );
                     last_error = Some(e.into());
+                    if !has_available {
+                        break;
+                    }
                     if attempt + 1 < max_retries {
                         sleep(Self::retry_delay(attempt)).await;
                     }
@@ -360,15 +375,20 @@ impl KiroProvider {
             let response = match request.send().await {
                 Ok(resp) => resp,
                 Err(e) => {
+                    let proxy = self.proxy_label(&ctx.credentials);
+                    let has_available = self.token_manager.report_transport_error(ctx.id);
                     tracing::warn!(
-                        "API 请求发送失败（尝试 {}/{}）: {}",
+                        "API 请求发送失败（凭据 #{}, proxy={}, 尝试 {}/{}）: {}",
+                        ctx.id,
+                        proxy,
                         attempt + 1,
                         max_retries,
                         e
                     );
-                    // 网络错误通常是上游/链路瞬态问题，不应导致"禁用凭据"或"切换凭据"
-                    // （否则一段时间网络抖动会把所有凭据都误禁用，需要重启才能恢复）
                     last_error = Some(e.into());
+                    if !has_available {
+                        break;
+                    }
                     if attempt + 1 < max_retries {
                         sleep(Self::retry_delay(attempt)).await;
                     }
@@ -577,4 +597,26 @@ impl KiroProvider {
         let jitter = fastrand::u64(0..=jitter_max);
         Duration::from_millis(backoff.saturating_add(jitter))
     }
+}
+
+fn sanitize_proxy_url(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let authority_start = scheme_end + 3;
+    let authority_end = url[authority_start..]
+        .find(['/', '?', '#'])
+        .map(|idx| authority_start + idx)
+        .unwrap_or(url.len());
+    let authority = &url[authority_start..authority_end];
+    let Some(at_pos) = authority.rfind('@') else {
+        return url.to_string();
+    };
+
+    format!(
+        "{}://***@{}{}",
+        &url[..scheme_end],
+        &authority[at_pos + 1..],
+        &url[authority_end..]
+    )
 }
