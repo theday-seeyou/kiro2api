@@ -30,6 +30,14 @@ pub(crate) fn is_token_expiring_within(
     credentials: &KiroCredentials,
     minutes: i64,
 ) -> Option<bool> {
+    // A missing accessToken is always unusable, even if expiresAt is present
+    // and far in the future. Some account-manager exports contain only a
+    // refreshToken with a placeholder/future expiresAt; without this guard the
+    // request path skips refresh and later fails with "没有可用的 accessToken".
+    if credentials.access_token.as_deref().unwrap_or("").is_empty() {
+        return Some(true);
+    }
+
     credentials
         .expires_at
         .as_ref()
@@ -2630,10 +2638,29 @@ mod tests {
     }
 
     #[test]
+    fn test_is_token_expired_with_future_expiry_but_missing_access_token() {
+        let mut credentials = KiroCredentials::default();
+        let future = Utc::now() + Duration::hours(1);
+        credentials.expires_at = Some(future.to_rfc3339());
+        credentials.refresh_token = Some("a".repeat(150));
+        assert!(is_token_expired(&credentials));
+    }
+
+    #[test]
+    fn test_is_token_expired_with_future_expiry_and_access_token() {
+        let mut credentials = KiroCredentials::default();
+        let future = Utc::now() + Duration::hours(1);
+        credentials.expires_at = Some(future.to_rfc3339());
+        credentials.access_token = Some("test_access_token".to_string());
+        assert!(!is_token_expired(&credentials));
+    }
+
+    #[test]
     fn test_is_token_expired_with_valid_token() {
         let mut credentials = KiroCredentials::default();
         let future = Utc::now() + Duration::hours(1);
         credentials.expires_at = Some(future.to_rfc3339());
+        credentials.access_token = Some("test_access_token".to_string());
         assert!(!is_token_expired(&credentials));
     }
 
