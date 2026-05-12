@@ -1418,12 +1418,18 @@ impl MultiTokenManager {
             let mut entries = self.entries.lock();
             recover_expired_rate_limits(&mut entries);
             if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                entry.failure_count = 0;
-                entry.refresh_failure_count = 0;
-                entry.rate_limited_until = None;
-                if entry.disabled_reason == Some(DisabledReason::RateLimited) {
-                    entry.disabled = false;
-                    entry.disabled_reason = None;
+                let has_active_rate_limit = entry.disabled
+                    && entry.disabled_reason == Some(DisabledReason::RateLimited)
+                    && entry.rate_limited_until.is_some();
+
+                if !has_active_rate_limit {
+                    entry.failure_count = 0;
+                    entry.refresh_failure_count = 0;
+                    entry.rate_limited_until = None;
+                    if entry.disabled_reason == Some(DisabledReason::RateLimited) {
+                        entry.disabled = false;
+                        entry.disabled_reason = None;
+                    }
                 }
                 entry.success_count += 1;
                 entry.last_used_at = Some(Utc::now().to_rfc3339());
@@ -2691,6 +2697,7 @@ mod tests {
         let mut credentials = KiroCredentials::default();
         let expires = Utc::now() + Duration::minutes(15);
         credentials.expires_at = Some(expires.to_rfc3339());
+        credentials.access_token = Some("test_access_token".to_string());
         assert!(!is_token_expiring_soon(&credentials));
     }
 
@@ -3006,6 +3013,28 @@ mod tests {
         assert_eq!(first.disabled_reason, None);
         assert!(first.rate_limited_until.is_none());
         assert_eq!(snapshot.current_id, 2);
+    }
+
+    #[test]
+    fn test_multi_token_manager_success_keeps_active_rate_limit_cooldown() {
+        let config = Config::default();
+        let cred1 = KiroCredentials::default();
+        let cred2 = KiroCredentials::default();
+
+        let manager =
+            MultiTokenManager::new(config, vec![cred1, cred2], None, None, false).unwrap();
+
+        assert!(manager.report_rate_limited(1));
+        manager.report_success(1);
+
+        let snapshot = manager.snapshot();
+        let first = snapshot.entries.iter().find(|e| e.id == 1).unwrap();
+        assert!(first.disabled);
+        assert_eq!(first.disabled_reason.as_deref(), Some("RateLimited"));
+        assert_eq!(first.failure_count, 1);
+        assert!(first.rate_limited_until.is_some());
+        assert_eq!(first.success_count, 1);
+        assert_eq!(manager.available_count(), 1);
     }
 
     #[test]
