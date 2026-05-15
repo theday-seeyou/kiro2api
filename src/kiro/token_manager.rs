@@ -1612,8 +1612,8 @@ impl MultiTokenManager {
     /// 报告指定凭据额度已用尽
     ///
     /// 用于处理 402 Payment Required 且 reason 为 `MONTHLY_REQUEST_COUNT` 的场景：
-    /// - 立即禁用该凭据（不等待连续失败阈值）
-    /// - 切换到下一个可用凭据继续重试
+    /// - 记录日志并切换到下一个可用凭据继续重试
+    /// - 不禁用凭据，允许额度恢复后继续使用
     /// - 返回是否还有可用凭据
     pub fn report_quota_exhausted(&self, id: u64) -> bool {
         let result = {
@@ -1630,18 +1630,14 @@ impl MultiTokenManager {
                 return entries.iter().any(|e| !e.disabled);
             }
 
-            entry.disabled = true;
-            entry.disabled_reason = Some(DisabledReason::QuotaExceeded);
             entry.last_used_at = Some(Utc::now().to_rfc3339());
-            // 设为阈值，便于在管理面板中直观看到该凭据已不可用
-            entry.failure_count = MAX_FAILURES_PER_CREDENTIAL;
 
-            tracing::error!("凭据 #{} 额度已用尽（MONTHLY_REQUEST_COUNT），已被禁用", id);
+            tracing::warn!("凭据 #{} 额度已用尽（MONTHLY_REQUEST_COUNT），切换到其他凭据", id);
 
-            // 切换到优先级最高的可用凭据
+            // 切换到优先级最高的其他可用凭据
             if let Some(next) = entries
                 .iter()
-                .filter(|e| !e.disabled)
+                .filter(|e| !e.disabled && e.id != id)
                 .min_by_key(|e| e.credentials.priority)
             {
                 *current_id = next.id;
@@ -1652,8 +1648,8 @@ impl MultiTokenManager {
                 );
                 true
             } else {
-                tracing::error!("所有凭据均已禁用！");
-                false
+                tracing::warn!("没有其他可用凭据可切换");
+                entries.iter().any(|e| !e.disabled && e.id != id)
             }
         };
         self.save_stats_debounced();

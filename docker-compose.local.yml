@@ -1,0 +1,17 @@
+services:
+  kiro2api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kiro2api
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8990:8990"
+    volumes:
+      - ./config/:/app/config/
+    restart: unless-stopped
+
+networks:
+  default:
+    name: kiro2api_default
