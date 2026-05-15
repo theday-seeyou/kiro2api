@@ -853,11 +853,9 @@ impl MultiTokenManager {
                     .unwrap_or(false)
             {
                 tracing::warn!(
-                    "凭据 #{} 配置了 authMethod=api_key 但缺少 kiroApiKey 字段，已自动禁用",
+                    "凭据 #{} 配置了 authMethod=api_key 但缺少 kiroApiKey 字段",
                     entry.id
                 );
-                entry.disabled = true;
-                entry.disabled_reason = Some(DisabledReason::InvalidConfig);
             }
         }
 
@@ -1047,26 +1045,7 @@ impl MultiTokenManager {
                     // 当前凭据不可用或 balanced 模式，根据负载均衡策略选择
                     let mut best = self.select_next_credential(model);
 
-                    // 没有可用凭据：如果是"自动禁用导致全灭"，做一次类似重启的自愈
-                    if best.is_none() {
-                        let mut entries = self.entries.lock();
-                        if entries.iter().any(|e| {
-                            e.disabled && e.disabled_reason == Some(DisabledReason::TooManyFailures)
-                        }) {
-                            tracing::warn!(
-                                "所有凭据均已被自动禁用，执行自愈：重置失败计数并重新启用（等价于重启）"
-                            );
-                            for e in entries.iter_mut() {
-                                if e.disabled_reason == Some(DisabledReason::TooManyFailures) {
-                                    e.disabled = false;
-                                    e.disabled_reason = None;
-                                    e.failure_count = 0;
-                                }
-                            }
-                            drop(entries);
-                            best = self.select_next_credential(model);
-                        }
-                    }
+                    // 没有可用凭据时无需自愈（不再自动禁用凭据）
 
                     if let Some((new_id, new_creds)) = best {
                         // 更新 current_id
@@ -1416,21 +1395,9 @@ impl MultiTokenManager {
     pub fn report_success(&self, id: u64) {
         {
             let mut entries = self.entries.lock();
-            recover_expired_rate_limits(&mut entries);
             if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
-                let has_active_rate_limit = entry.disabled
-                    && entry.disabled_reason == Some(DisabledReason::RateLimited)
-                    && entry.rate_limited_until.is_some();
-
-                if !has_active_rate_limit {
-                    entry.failure_count = 0;
-                    entry.refresh_failure_count = 0;
-                    entry.rate_limited_until = None;
-                    if entry.disabled_reason == Some(DisabledReason::RateLimited) {
-                        entry.disabled = false;
-                        entry.disabled_reason = None;
-                    }
-                }
+                entry.failure_count = 0;
+                entry.refresh_failure_count = 0;
                 entry.success_count += 1;
                 entry.last_used_at = Some(Utc::now().to_rfc3339());
                 tracing::debug!(
@@ -1445,7 +1412,7 @@ impl MultiTokenManager {
 
     /// 报告指定凭据 API 调用失败
     ///
-    /// 增加失败计数，达到阈值时禁用凭据并切换到优先级最高的可用凭据
+    /// 增加失败计数并切换到优先级最高的其他可用凭据
     /// 返回是否还有可用凭据可以重试
     ///
     /// # Arguments
@@ -1477,14 +1444,12 @@ impl MultiTokenManager {
             );
 
             if failure_count >= MAX_FAILURES_PER_CREDENTIAL {
-                entry.disabled = true;
-                entry.disabled_reason = Some(DisabledReason::TooManyFailures);
-                tracing::error!("凭据 #{} 已连续失败 {} 次，已被禁用", id, failure_count);
+                tracing::warn!("凭据 #{} 已连续失败 {} 次，切换到其他凭据", id, failure_count);
 
-                // 切换到优先级最高的可用凭据
+                // 切换到优先级最高的其他可用凭据
                 if let Some(next) = entries
                     .iter()
-                    .filter(|e| !e.disabled)
+                    .filter(|e| !e.disabled && e.id != id)
                     .min_by_key(|e| e.credentials.priority)
                 {
                     *current_id = next.id;
@@ -1494,7 +1459,7 @@ impl MultiTokenManager {
                         next.credentials.priority
                     );
                 } else {
-                    tracing::error!("所有凭据均已禁用！");
+                    tracing::warn!("没有其他可用凭据可切换");
                 }
             }
 
@@ -1506,7 +1471,7 @@ impl MultiTokenManager {
 
     /// 报告指定凭据被上游限流。
     ///
-    /// 限流通常是临时状态：把当前凭据放入冷却池并主动切走，冷却到期后自动恢复。
+    /// 限流通常是临时状态：记录日志并切换到其他凭据，不禁用凭据。
     pub fn report_rate_limited(&self, id: u64) -> bool {
         let result = {
             let mut entries = self.entries.lock();
@@ -1518,23 +1483,18 @@ impl MultiTokenManager {
                 None => return entries.iter().any(|e| !e.disabled),
             };
 
-            if entry.disabled && entry.disabled_reason != Some(DisabledReason::RateLimited) {
+            if entry.disabled {
                 return entries.iter().any(|e| !e.disabled);
             }
 
             entry.failure_count += 1;
             entry.last_used_at = Some(Utc::now().to_rfc3339());
             let failure_count = entry.failure_count;
-            let cooldown = rate_limit_cooldown_for_failure(failure_count);
-            entry.disabled = true;
-            entry.disabled_reason = Some(DisabledReason::RateLimited);
-            entry.rate_limited_until = Some(Instant::now() + cooldown);
 
             tracing::warn!(
-                "凭据 #{} 被上游限流（第 {} 次），冷却 {} 秒后自动恢复，尝试切换到其他凭据",
+                "凭据 #{} 被上游限流（第 {} 次），切换到其他凭据",
                 id,
-                failure_count,
-                cooldown.as_secs()
+                failure_count
             );
 
             if let Some(next) = entries
@@ -1548,11 +1508,11 @@ impl MultiTokenManager {
                     next.id,
                     next.credentials.priority
                 );
-            } else if !entries.iter().any(|e| !e.disabled) {
-                tracing::error!("所有凭据均已禁用！");
+            } else {
+                tracing::warn!("没有其他可用凭据可切换");
             }
 
-            entries.iter().any(|e| !e.disabled)
+            entries.iter().any(|e| !e.disabled && e.id != id)
         };
         self.save_stats_debounced();
         result
@@ -1561,7 +1521,7 @@ impl MultiTokenManager {
     /// 报告指定凭据遇到代理/网络传输错误。
     ///
     /// 传输错误多由代理不可达、代理协议不匹配、DNS/握手超时等链路问题导致。
-    /// 这里只做短暂冷却并切换凭据，不把账号永久禁用，也不混入上游限流状态。
+    /// 这里只切换凭据，不禁用凭据。
     pub fn report_transport_error(&self, id: u64) -> bool {
         let result = {
             let mut entries = self.entries.lock();
@@ -1573,19 +1533,15 @@ impl MultiTokenManager {
                 None => return entries.iter().any(|e| !e.disabled),
             };
 
-            if entry.disabled && entry.disabled_reason != Some(DisabledReason::TransportError) {
+            if entry.disabled {
                 return entries.iter().any(|e| !e.disabled);
             }
 
             entry.last_used_at = Some(Utc::now().to_rfc3339());
-            entry.disabled = true;
-            entry.disabled_reason = Some(DisabledReason::TransportError);
-            entry.rate_limited_until = Some(Instant::now() + TRANSPORT_ERROR_COOLDOWN);
 
             tracing::warn!(
-                "凭据 #{} 遇到代理/网络传输错误，冷却 {} 秒后自动恢复，尝试切换到其他凭据",
-                id,
-                TRANSPORT_ERROR_COOLDOWN.as_secs()
+                "凭据 #{} 遇到代理/网络传输错误，切换到其他凭据",
+                id
             );
 
             if let Some(next) = entries
@@ -1599,11 +1555,11 @@ impl MultiTokenManager {
                     next.id,
                     next.credentials.priority
                 );
-            } else if !entries.iter().any(|e| !e.disabled) {
-                tracing::error!("所有凭据均处于禁用或冷却状态！");
+            } else {
+                tracing::warn!("没有其他可用凭据可切换");
             }
 
-            entries.iter().any(|e| !e.disabled)
+            entries.iter().any(|e| !e.disabled && e.id != id)
         };
         self.save_stats_debounced();
         result
@@ -1659,7 +1615,7 @@ impl MultiTokenManager {
     /// 报告指定凭据刷新 Token 失败。
     ///
     /// 刷新失败后立即切换到其他可用凭据，避免坏代理/坏 token 阻塞请求池。
-    /// 连续刷新失败达到阈值后禁用凭据。
+    /// 不禁用凭据，允许后续重试刷新。
     pub fn report_refresh_failure(&self, id: u64) -> bool {
         let result = {
             let mut entries = self.entries.lock();
@@ -1686,57 +1642,32 @@ impl MultiTokenManager {
                 MAX_FAILURES_PER_CREDENTIAL
             );
 
-            if refresh_failure_count < MAX_FAILURES_PER_CREDENTIAL {
-                if *current_id == id {
-                    if let Some(next) = entries
-                        .iter()
-                        .filter(|e| !e.disabled && e.id != id)
-                        .min_by_key(|e| e.credentials.priority)
-                    {
-                        *current_id = next.id;
-                        tracing::info!(
-                            "Token 刷新失败后已临时切换到凭据 #{}（优先级 {}）",
-                            next.id,
-                            next.credentials.priority
-                        );
-                    }
+            if *current_id == id {
+                if let Some(next) = entries
+                    .iter()
+                    .filter(|e| !e.disabled && e.id != id)
+                    .min_by_key(|e| e.credentials.priority)
+                {
+                    *current_id = next.id;
+                    tracing::info!(
+                        "Token 刷新失败后已切换到凭据 #{}（优先级 {}）",
+                        next.id,
+                        next.credentials.priority
+                    );
+                } else {
+                    tracing::warn!("没有其他可用凭据可切换");
                 }
-                return entries.iter().any(|e| !e.disabled);
             }
 
-            entry.disabled = true;
-            entry.disabled_reason = Some(DisabledReason::TooManyRefreshFailures);
-
-            tracing::error!(
-                "凭据 #{} Token 已连续刷新失败 {} 次，已被禁用",
-                id,
-                refresh_failure_count
-            );
-
-            if let Some(next) = entries
-                .iter()
-                .filter(|e| !e.disabled)
-                .min_by_key(|e| e.credentials.priority)
-            {
-                *current_id = next.id;
-                tracing::info!(
-                    "已切换到凭据 #{}（优先级 {}）",
-                    next.id,
-                    next.credentials.priority
-                );
-                true
-            } else {
-                tracing::error!("所有凭据均已禁用！");
-                false
-            }
+            entries.iter().any(|e| !e.disabled && e.id != id)
         };
         self.save_stats_debounced();
         result
     }
 
-    /// 报告指定凭据的 refreshToken 永久失效（invalid_grant）。
+    /// 报告指定凭据的 refreshToken 失效（invalid_grant）。
     ///
-    /// 立即禁用凭据，不累计、不重试。
+    /// 切换到其他可用凭据，不禁用凭据。
     /// 返回是否还有可用凭据。
     pub fn report_refresh_token_invalid(&self, id: u64) -> bool {
         let result = {
@@ -1754,17 +1685,15 @@ impl MultiTokenManager {
             }
 
             entry.last_used_at = Some(Utc::now().to_rfc3339());
-            entry.disabled = true;
-            entry.disabled_reason = Some(DisabledReason::InvalidRefreshToken);
 
-            tracing::error!(
-                "凭据 #{} refreshToken 已失效 (invalid_grant)，已立即禁用",
+            tracing::warn!(
+                "凭据 #{} refreshToken 已失效 (invalid_grant)，切换到其他凭据",
                 id
             );
 
             if let Some(next) = entries
                 .iter()
-                .filter(|e| !e.disabled)
+                .filter(|e| !e.disabled && e.id != id)
                 .min_by_key(|e| e.credentials.priority)
             {
                 *current_id = next.id;
@@ -1775,8 +1704,8 @@ impl MultiTokenManager {
                 );
                 true
             } else {
-                tracing::error!("所有凭据均已禁用！");
-                false
+                tracing::warn!("没有其他可用凭据可切换");
+                entries.iter().any(|e| !e.disabled && e.id != id)
             }
         };
         self.save_stats_debounced();
@@ -2164,9 +2093,6 @@ impl MultiTokenManager {
                 .iter_mut()
                 .find(|e| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
-            if entry.disabled_reason == Some(DisabledReason::InvalidConfig) {
-                anyhow::bail!("凭据 #{} 因配置无效被禁用，请修正配置后重启服务", id);
-            }
             entry.failure_count = 0;
             entry.refresh_failure_count = 0;
             entry.disabled = false;
